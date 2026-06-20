@@ -69,7 +69,7 @@ func (p *OpenAICompatibleProvider) Complete(ctx context.Context, req ir.Request)
 		return nil, fmt.Errorf("read upstream chat completion response: %w", err)
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		return nil, fmt.Errorf("upstream chat completions returned status %d", httpResp.StatusCode)
+		return nil, classifyHTTPStatus(p.name, httpResp.StatusCode, respBody)
 	}
 
 	var chatResp openaiapi.ChatCompletionResponse
@@ -91,7 +91,8 @@ func (p *OpenAICompatibleProvider) Stream(ctx context.Context, req ir.Request) (
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		defer httpResp.Body.Close()
-		return nil, fmt.Errorf("upstream chat completions returned status %d", httpResp.StatusCode)
+		respBody, _ := io.ReadAll(httpResp.Body)
+		return nil, classifyHTTPStatus(p.name, httpResp.StatusCode, respBody)
 	}
 
 	events := make(chan ir.Event)
@@ -155,12 +156,12 @@ func (p *OpenAICompatibleProvider) Health(ctx context.Context) error {
 func (p *OpenAICompatibleProvider) doChatCompletion(ctx context.Context, req ir.Request, stream bool) (*http.Response, error) {
 	token, err := p.tokenSource.Token(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("provider %q token: %w", p.name, err)
+		return nil, &Error{Code: ErrorProviderAuthFailed, Retryable: false, Provider: p.name}
 	}
 
 	chatReq, err := openaiapi.ChatCompletionRequestFromIR(req)
 	if err != nil {
-		return nil, fmt.Errorf("build chat completion request: %w", err)
+		return nil, &Error{Code: ErrorInvalidRequest, Retryable: false, Provider: p.name}
 	}
 	chatReq.Stream = stream
 
@@ -183,7 +184,7 @@ func (p *OpenAICompatibleProvider) doChatCompletion(ctx context.Context, req ir.
 
 	httpResp, err := p.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("call upstream chat completions: %w", err)
+		return nil, classifyNetworkError(p.name, err)
 	}
 	return httpResp, nil
 }

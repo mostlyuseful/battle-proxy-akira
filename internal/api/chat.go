@@ -9,6 +9,7 @@ import (
 	"battle-proxy-akira/internal/ir"
 	requestlog "battle-proxy-akira/internal/logging"
 	openaiapi "battle-proxy-akira/internal/openai"
+	providerpkg "battle-proxy-akira/internal/provider"
 	"battle-proxy-akira/internal/router"
 	"battle-proxy-akira/internal/sse"
 )
@@ -80,7 +81,7 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 		providerResp, err := candidate.Provider.Complete(r.Context(), candidate.ProviderRequest(irReq))
 		if err != nil {
 			chatRouter.MarkFailure(candidate, err)
-			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorUpstream, "upstream provider request failed", ""))
+			writeLoggedOpenAIError(w, r, logger, logRec, started, proxyErrorFromProviderError(err, "upstream provider request failed"))
 			return
 		}
 		chatRouter.MarkSuccess(candidate)
@@ -117,7 +118,7 @@ func streamChatCompletion(w http.ResponseWriter, r *http.Request, chatRouter rou
 	events, err := candidate.Provider.Stream(r.Context(), candidate.ProviderRequest(irReq))
 	if err != nil {
 		chatRouter.MarkFailure(candidate, err)
-		writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorUpstream, "upstream provider stream failed", ""))
+		writeLoggedOpenAIError(w, r, logger, logRec, started, proxyErrorFromProviderError(err, "upstream provider stream failed"))
 		return
 	}
 
@@ -146,6 +147,29 @@ func writeLoggedOpenAIError(w http.ResponseWriter, r *http.Request, logger reque
 	rec.Status = proxyErr.StatusCode()
 	rec.LatencyMS = time.Since(started).Milliseconds()
 	_ = logger.LogRequest(r.Context(), rec)
+}
+
+func proxyErrorFromProviderError(err error, fallbackMessage string) *ProxyError {
+	var providerErr *providerpkg.Error
+	if errors.As(err, &providerErr) {
+		switch providerErr.Code {
+		case providerpkg.ErrorInvalidRequest:
+			return NewProxyError(ErrorInvalidRequest, "upstream provider rejected the request", "")
+		case providerpkg.ErrorUnsupportedModality:
+			return NewProxyError(ErrorUnsupportedModality, "upstream provider does not support the requested modality", "")
+		case providerpkg.ErrorInputTooLarge:
+			return NewProxyError(ErrorInputTooLarge, "upstream provider rejected the request as too large", "")
+		case providerpkg.ErrorProviderAuthFailed:
+			return NewProxyError(ErrorProviderAuthFailed, "upstream provider authentication failed", "")
+		case providerpkg.ErrorProviderRateLimited:
+			return NewProxyError(ErrorProviderRateLimited, "upstream provider rate limited the request", "")
+		case providerpkg.ErrorProviderExhausted:
+			return NewProxyError(ErrorProviderExhausted, "upstream provider is exhausted", "")
+		case providerpkg.ErrorPolicyDenied:
+			return NewProxyError(ErrorPolicyDenied, "upstream provider denied the request", "")
+		}
+	}
+	return NewProxyError(ErrorUpstream, fallbackMessage, "")
 }
 
 func proxyErrorFromRouterError(err error) *ProxyError {

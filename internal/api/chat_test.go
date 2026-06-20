@@ -187,8 +187,8 @@ func TestChatCompletionsStreamingPreStreamError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"stream":true}`))
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusBadGateway)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusTooManyRequests)
 	}
 	if got := rec.Header().Get("Content-Type"); got != "application/json" {
 		t.Fatalf("content-type = %q, want application/json", got)
@@ -197,8 +197,8 @@ func TestChatCompletionsStreamingPreStreamError(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decode error response: %v", err)
 	}
-	if body.Error.Code != string(ErrorUpstream) {
-		t.Fatalf("error code = %q, want %q", body.Error.Code, ErrorUpstream)
+	if body.Error.Code != string(ErrorProviderRateLimited) {
+		t.Fatalf("error code = %q, want %q", body.Error.Code, ErrorProviderRateLimited)
 	}
 }
 

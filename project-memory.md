@@ -134,3 +134,10 @@
 - Decision: default API servers to `config.DefaultMaxBodyBytes` and add `WithServerConfig` so `ServerConfig.MaxBodyBytes` controls chat request body limits. Chat handlers reject requests with oversized `Content-Length` before reading, otherwise wrap the body with `http.MaxBytesReader`, and return OpenAI-style `input_too_large` errors with HTTP 413 while logging the 413 metadata record.
 - Rejected alternatives: returning generic 400 for oversized bodies, because 413 is specifically actionable for clients; disabling limits when no explicit option is passed, because the config default exists to protect fresh deployments.
 - Affected area: API server options, Chat Completions body reading, OpenAI-style error mapping, and future endpoint request handling.
+
+### Provider error classification defaults
+
+- Context: `provider.error-classification` needed router-visible retry semantics without exposing provider internals, while subscription exhaustion and multi-credential handling are later work.
+- Decision: add a provider-neutral `provider.Error` with stable code, HTTP status, provider name, and `Retryable` flag, plus helper functions for routers/API mapping. Treat HTTP 408/429/502/503/504, connection resets/refusals, and timeouts as retryable; keep 400/401/403/413/422 non-retryable; parse only OpenAI-style error `code`/`type` fields to refine internal codes and never include upstream error bodies or tokens in error strings. API responses now map classified provider failures to corresponding OpenAI-style proxy codes.
+- Rejected alternatives: returning raw provider response bodies/messages for better diagnostics, because they can contain secrets or provider-specific implementation details; making 401/403 retryable, because multiple credential support/exhaustion detection is not implemented yet.
+- Affected area: provider adapters, router retry/fallback decisions, API upstream error mapping, and future circuit breaker/exhaustion tasks.

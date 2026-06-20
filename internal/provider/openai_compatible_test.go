@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -125,6 +126,103 @@ func TestOpenAICompatibleProviderCompletePostsChatCompletion(t *testing.T) {
 	}
 	if !json.Valid(resp.RawBody) {
 		t.Fatalf("response RawBody is invalid JSON: %s", resp.RawBody)
+	}
+}
+
+func TestOpenAICompatibleProviderClassifiesHTTPStatusErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		status    int
+		body      string
+		wantCode  string
+		retryable bool
+	}{
+		{name: "request timeout", status: http.StatusRequestTimeout, wantCode: ErrorUpstream, retryable: true},
+		{name: "rate limit", status: http.StatusTooManyRequests, wantCode: ErrorProviderRateLimited, retryable: true},
+		{name: "bad gateway", status: http.StatusBadGateway, wantCode: ErrorUpstream, retryable: true},
+		{name: "unavailable", status: http.StatusServiceUnavailable, wantCode: ErrorUpstream, retryable: true},
+		{name: "gateway timeout", status: http.StatusGatewayTimeout, wantCode: ErrorUpstream, retryable: true},
+		{name: "invalid request", status: http.StatusBadRequest, wantCode: ErrorInvalidRequest, retryable: false},
+		{name: "auth failed", status: http.StatusUnauthorized, wantCode: ErrorProviderAuthFailed, retryable: false},
+		{name: "policy denied", status: http.StatusForbidden, wantCode: ErrorPolicyDenied, retryable: false},
+		{name: "too large", status: http.StatusRequestEntityTooLarge, wantCode: ErrorInputTooLarge, retryable: false},
+		{name: "unsupported modality", status: http.StatusUnprocessableEntity, wantCode: ErrorUnsupportedModality, retryable: false},
+		{name: "payload code", status: http.StatusBadRequest, body: `{"error":{"code":"context_length_exceeded","message":"secret"}}`, wantCode: ErrorInputTooLarge, retryable: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+				if tt.body != "" {
+					_, _ = w.Write([]byte(tt.body))
+				}
+			}))
+			defer upstream.Close()
+
+			provider, err := NewOpenAICompatible("openai_api", config.ProviderConfig{BaseURL: upstream.URL}, staticTokenSource("test-token"), upstream.Client())
+			if err != nil {
+				t.Fatalf("NewOpenAICompatible: %v", err)
+			}
+
+			_, err = provider.Complete(context.Background(), validTextRequest())
+			if err == nil {
+				t.Fatal("Complete returned nil error, want classified provider error")
+			}
+			var providerErr *Error
+			if !errors.As(err, &providerErr) {
+				t.Fatalf("error = %T %[1]v, want *provider.Error", err)
+			}
+			if providerErr.Code != tt.wantCode || providerErr.Retryable != tt.retryable || IsRetryable(err) != tt.retryable {
+				t.Fatalf("classified error = %#v, IsRetryable=%v, want code %q retryable %v", providerErr, IsRetryable(err), tt.wantCode, tt.retryable)
+			}
+			if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "test-token") {
+				t.Fatalf("classified error leaked provider details: %q", err.Error())
+			}
+		})
+	}
+}
+
+func TestOpenAICompatibleProviderClassifiesNetworkErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		err       error
+		retryable bool
+	}{
+		{name: "timeout", err: context.DeadlineExceeded, retryable: true},
+		{name: "connection reset", err: errors.New("read tcp: connection reset by peer"), retryable: true},
+		{name: "dns", err: errors.New("no such host"), retryable: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			provider, err := NewOpenAICompatible("openai_api", config.ProviderConfig{BaseURL: "https://example.invalid/v1"}, staticTokenSource("test-token"), &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, tt.err
+			})})
+			if err != nil {
+				t.Fatalf("NewOpenAICompatible: %v", err)
+			}
+
+			_, err = provider.Complete(context.Background(), validTextRequest())
+			if err == nil {
+				t.Fatal("Complete returned nil error, want classified network error")
+			}
+			var providerErr *Error
+			if !errors.As(err, &providerErr) {
+				t.Fatalf("error = %T %[1]v, want *provider.Error", err)
+			}
+			if providerErr.Code != ErrorUpstream || providerErr.Retryable != tt.retryable {
+				t.Fatalf("classified error = %#v, want upstream retryable %v", providerErr, tt.retryable)
+			}
+		})
 	}
 }
 
@@ -315,6 +413,17 @@ func TestOpenAICompatibleProviderModelsReturnsConfiguredModels(t *testing.T) {
 	}
 	if len(models) != 1 || models[0].ID != "gpt-test" || models[0].Provider != "openai_api" {
 		t.Fatalf("models = %#v", models)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func validTextRequest() ir.Request {
+	return ir.Request{
+		Model:    "gpt-test",
+		Messages: []ir.Message{{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "hello"}}}},
 	}
 }
 
