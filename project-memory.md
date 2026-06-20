@@ -162,3 +162,10 @@
 - Decision: keep execution/fallback orchestration in the Chat Completions API handler, iterating router-provided candidates in order. For non-streaming calls, retry classified retryable provider errors before any response is written, stop immediately on non-retryable errors, and return the last candidate's classified error when all retryable candidates fail. For streaming, retain the existing pre-first-event retry boundary. The request is copied through `RouteCandidate.ProviderRequest` for each attempt so only the concrete provider model changes, and logs record the final attempted provider/model plus retry count.
 - Rejected alternatives: expanding the router interface to execute provider requests, because that would mix routing with API response/stream state and duplicate the streaming safety boundary; returning a generic no-available-model when all candidates fail, because preserving the last classified provider code is more actionable for clients.
 - Affected area: Chat Completions execution, synthetic candidate fallback, request logging retry counts, and future circuit-breaker/backoff tasks.
+
+### Access-token source behavior
+
+- Context: `auth.access-token-sources` needed subscription-style token sources for env, file, and command auth without depending on undocumented Codex local files.
+- Decision: implement `env_access_token`, `file_access_token`, and `access_token_command` under the existing `TokenSource` interface. Env and file sources trim whitespace and reject empty values. Command sources execute the configured command directly, parse JSON with `access_token` and optional RFC3339 `expires_at`, reject malformed/empty/expired tokens, and do not cache tokens yet. Errors identify source type/path/env/command failure class but never include token values or command output.
+- Rejected alternatives: caching command tokens until `expires_at`, because token cache/refresh behavior has separate future work; accepting plain-text command output, because the spec requires JSON and future expiry metadata.
+- Affected area: provider auth construction, access-token based providers, future token caching/refresh and exhaustion handling.
