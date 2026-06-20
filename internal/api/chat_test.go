@@ -102,6 +102,101 @@ func TestChatCompletionsNonStreamingEndToEnd(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsStreamingEndToEnd(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "upstream-token")
+
+	var captured struct {
+		Path          string
+		Authorization string
+		Accept        string
+		Body          map[string]any
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.Path = r.URL.Path
+		captured.Authorization = r.Header.Get("Authorization")
+		captured.Accept = r.Header.Get("Accept")
+		if err := json.NewDecoder(r.Body).Decode(&captured.Body); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	handler := NewServer(WithChatRouter(newTestChatRouter(t, upstream.URL)))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model": "gpt-test",
+		"messages": [{"role": "user", "content": "hello"}],
+		"stream": true
+	}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d, body %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("content-type = %q, want text/event-stream", got)
+	}
+	if !rec.Flushed {
+		t.Fatal("response was not flushed")
+	}
+	if captured.Path != "/v1/chat/completions" {
+		t.Fatalf("upstream path = %q, want /v1/chat/completions", captured.Path)
+	}
+	if captured.Authorization != "Bearer upstream-token" {
+		t.Fatalf("upstream authorization = %q, want bearer token", captured.Authorization)
+	}
+	if captured.Accept != "text/event-stream" {
+		t.Fatalf("upstream accept = %q, want text/event-stream", captured.Accept)
+	}
+	if captured.Body["stream"] != true {
+		t.Fatalf("upstream stream = %#v, want true", captured.Body["stream"])
+	}
+
+	want := "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n" +
+		"data: [DONE]\n\n"
+	if rec.Body.String() != want {
+		t.Fatalf("stream body = %q, want %q", rec.Body.String(), want)
+	}
+}
+
+func TestChatCompletionsStreamingPreStreamError(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "upstream-token")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream failed", http.StatusTooManyRequests)
+	}))
+	defer upstream.Close()
+
+	handler := NewServer(WithChatRouter(newTestChatRouter(t, upstream.URL)))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"stream":true}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content-type = %q, want application/json", got)
+	}
+	var body OpenAIErrorResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if body.Error.Code != string(ErrorUpstream) {
+		t.Fatalf("error code = %q, want %q", body.Error.Code, ErrorUpstream)
+	}
+}
+
 func TestChatCompletionsErrors(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "upstream-token")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -118,7 +213,6 @@ func TestChatCompletionsErrors(t *testing.T) {
 		wantCode   ErrorCode
 	}{
 		{name: "bad json", body: `{`, wantStatus: http.StatusBadRequest, wantCode: ErrorInvalidRequest},
-		{name: "stream true", body: `{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"stream":true}`, wantStatus: http.StatusBadRequest, wantCode: ErrorInvalidRequest},
 		{name: "unknown model", body: `{"model":"missing","messages":[{"role":"user","content":"hello"}]}`, wantStatus: http.StatusNotFound, wantCode: ErrorUnknownModel},
 		{name: "upstream failure", body: `{"model":"gpt-test","messages":[{"role":"user","content":"hello"}]}`, wantStatus: http.StatusBadGateway, wantCode: ErrorUpstream},
 	}

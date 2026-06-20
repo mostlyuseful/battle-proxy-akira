@@ -89,6 +89,13 @@
 ### Non-streaming Chat Completions endpoint behavior
 
 - Context: `api.chat-nonstream` needed the first end-to-end chat path, while streaming behavior and synthetic fallback are later tasks and usage compatibility can be either omitted or null when unknown.
-- Decision: register `/v1/chat/completions` for all servers and require a configured chat router for successful calls. The handler rejects `stream:true` with `invalid_request` until the streaming API task, parses text-only Chat Completions into IR, resolves routes through the router, uses the first returned candidate only, rewrites provider requests/responses through route metadata, and returns OpenAI-compatible JSON with `usage` omitted when the provider does not return usage.
+- Decision: register `/v1/chat/completions` for all servers and require a configured chat router for successful calls. The non-streaming path parses text-only Chat Completions into IR, resolves routes through the router, uses the first returned candidate only, rewrites provider requests/responses through route metadata, and returns OpenAI-compatible JSON with `usage` omitted when the provider does not return usage. Streaming is now handled by `api.chat-stream`.
 - Rejected alternatives: silently treating `stream:true` as non-streaming, because that would violate client expectations; implementing candidate fallback here, because retry/fallback has dedicated router tasks; returning zero token usage when unknown, because omitting unknown usage is allowed by the spec and avoids misleading clients.
 - Affected area: `/v1/chat/completions`, router/API integration, streaming handler follow-up, fallback follow-up, and usage compatibility.
+
+### Streaming Chat Completions API behavior
+
+- Context: `api.chat-stream` needed SSE output for `stream:true`, while fallback across candidates and provider-specific stream chunk translation are later tasks.
+- Decision: use the same `/v1/chat/completions` handler to branch on `stream:true` after JSON parsing and route resolution. If provider `Stream` returns an error before headers are written, return OpenAI-style JSON. After a stream starts, set SSE headers and forward each upstream event's raw `Text` payload as `data: ...\n\n`, including `[DONE]`, flushing via the SSE helper; do not attempt fallback or model-name JSON rewriting mid-stream.
+- Rejected alternatives: buffering the whole stream to inspect/rewrite chunks, because streaming should be incremental; silently falling back to later candidates after bytes are written, because the spec forbids switching providers after the first streamed token.
+- Affected area: `/v1/chat/completions` streaming path, provider stream event contract, future retry-before-stream and stream translation tasks.

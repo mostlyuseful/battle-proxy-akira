@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"time"
 
+	"battle-proxy-akira/internal/ir"
 	openaiapi "battle-proxy-akira/internal/openai"
 	"battle-proxy-akira/internal/router"
+	"battle-proxy-akira/internal/sse"
 )
 
 // RegisterChatRoutes wires Chat Completions endpoints.
@@ -32,11 +34,6 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 			WriteOpenAIError(w, NewProxyError(ErrorInvalidRequest, "invalid Chat Completions request JSON", ""))
 			return
 		}
-		if chatReq.Stream {
-			WriteOpenAIError(w, NewProxyError(ErrorInvalidRequest, "streaming chat completions are not supported by this endpoint yet", "stream"))
-			return
-		}
-
 		irReq, err := chatReq.ToIR()
 		if err != nil {
 			WriteOpenAIError(w, NewProxyError(ErrorInvalidRequest, err.Error(), ""))
@@ -54,6 +51,11 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 		}
 
 		candidate := candidates[0]
+		if chatReq.Stream {
+			streamChatCompletion(w, r, chatRouter, candidate, irReq)
+			return
+		}
+
 		providerResp, err := candidate.Provider.Complete(r.Context(), candidate.ProviderRequest(irReq))
 		if err != nil {
 			chatRouter.MarkFailure(candidate, err)
@@ -65,6 +67,25 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 		resp := candidate.RewriteResponse(*providerResp)
 		writeJSON(w, http.StatusOK, openaiapi.ChatCompletionResponseFromIR(resp, time.Now()))
 	})))
+}
+
+func streamChatCompletion(w http.ResponseWriter, r *http.Request, chatRouter router.Router, candidate router.RouteCandidate, irReq ir.Request) {
+	events, err := candidate.Provider.Stream(r.Context(), candidate.ProviderRequest(irReq))
+	if err != nil {
+		chatRouter.MarkFailure(candidate, err)
+		WriteOpenAIError(w, NewProxyError(ErrorUpstream, "upstream provider stream failed", ""))
+		return
+	}
+
+	sse.SetHeaders(w.Header())
+	w.WriteHeader(http.StatusOK)
+	for event := range events {
+		if err := sse.WriteData(w, event.Text); err != nil {
+			chatRouter.MarkFailure(candidate, err)
+			return
+		}
+	}
+	chatRouter.MarkSuccess(candidate)
 }
 
 func proxyErrorFromRouterError(err error) *ProxyError {
