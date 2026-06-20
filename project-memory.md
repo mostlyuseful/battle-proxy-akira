@@ -99,3 +99,10 @@
 - Decision: use the same `/v1/chat/completions` handler to branch on `stream:true` after JSON parsing and route resolution. If provider `Stream` returns an error before headers are written, return OpenAI-style JSON. After a stream starts, set SSE headers and forward each upstream event's raw `Text` payload as `data: ...\n\n`, including `[DONE]`, flushing via the SSE helper; do not attempt fallback or model-name JSON rewriting mid-stream.
 - Rejected alternatives: buffering the whole stream to inspect/rewrite chunks, because streaming should be incremental; silently falling back to later candidates after bytes are written, because the spec forbids switching providers after the first streamed token.
 - Affected area: `/v1/chat/completions` streaming path, provider stream event contract, future retry-before-stream and stream translation tasks.
+
+### Metadata JSONL logging defaults
+
+- Context: `logging.jsonl-metadata` needed request IDs and logging behavior before the dedicated `api.request-ids` task exists, and the spec did not say whether logging failures should fail requests.
+- Decision: add an `internal/logging` package with `off` no-op and `metadata_only` JSONL append modes, plus a small API `WithRequestLogger` hook. Chat handlers log metadata for completed handler paths and ignore logger errors so successful model responses are not failed by observability issues. The log request ID uses `X-Request-ID` when present and otherwise generates a temporary `req_<hex>` value until the request-ID task centralizes propagation.
+- Rejected alternatives: failing successful requests when JSONL writes fail, because the task explicitly asks logging failures not to crash successful requests; waiting for `api.request-ids`, because request logging can use a local fallback and later be unified.
+- Affected area: chat completion handlers, logging package, future request ID propagation, and later redaction/logging hardening tasks.

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	requestlog "battle-proxy-akira/internal/logging"
 	"battle-proxy-akira/internal/router"
 )
 
@@ -14,9 +15,10 @@ type Middleware func(http.Handler) http.Handler
 type Option func(*serverOptions)
 
 type serverOptions struct {
-	modelLister ModelLister
-	chatRouter  router.Router
-	clientAuth  Middleware
+	modelLister   ModelLister
+	chatRouter    router.Router
+	clientAuth    Middleware
+	requestLogger requestlog.Logger
 }
 
 // WithModelLister configures the source used by GET /v1/models.
@@ -40,11 +42,19 @@ func WithClientAuth(middleware Middleware) Option {
 	}
 }
 
+// WithRequestLogger configures metadata request logging for chat completions.
+func WithRequestLogger(logger requestlog.Logger) Option {
+	return func(opts *serverOptions) {
+		opts.requestLogger = logger
+	}
+}
+
 // NewServer builds the HTTP handler tree for the proxy API.
 func NewServer(options ...Option) http.Handler {
 	opts := serverOptions{
-		modelLister: ModelListerFunc(emptyModels),
-		clientAuth:  identityMiddleware,
+		modelLister:   ModelListerFunc(emptyModels),
+		clientAuth:    identityMiddleware,
+		requestLogger: requestlog.NoopLogger{},
 	}
 	for _, option := range options {
 		option(&opts)
@@ -55,11 +65,14 @@ func NewServer(options ...Option) http.Handler {
 	if opts.clientAuth == nil {
 		opts.clientAuth = identityMiddleware
 	}
+	if opts.requestLogger == nil {
+		opts.requestLogger = requestlog.NoopLogger{}
+	}
 
 	mux := http.NewServeMux()
 	RegisterHealthRoutes(mux)
 	RegisterModelRoutes(mux, opts.modelLister, opts.clientAuth)
-	RegisterChatRoutes(mux, opts.chatRouter, opts.clientAuth)
+	RegisterChatRoutes(mux, opts.chatRouter, opts.clientAuth, opts.requestLogger)
 	return mux
 }
 

@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"battle-proxy-akira/internal/auth"
 	"battle-proxy-akira/internal/config"
 	"battle-proxy-akira/internal/ir"
+	requestlog "battle-proxy-akira/internal/logging"
 	providerpkg "battle-proxy-akira/internal/provider"
 	"battle-proxy-akira/internal/router"
 )
@@ -237,6 +240,74 @@ func TestChatCompletionsErrors(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsMetadataLogging(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "upstream-token")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id": "chatcmpl-upstream",
+			"object": "chat.completion",
+			"created": 123,
+			"model": "gpt-test",
+			"choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]
+		}`))
+	}))
+	defer upstream.Close()
+
+	logger := &recordingLogger{}
+	handler := NewServer(
+		WithChatRouter(newTestChatRouter(t, upstream.URL)),
+		WithRequestLogger(logger),
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("X-Request-ID", "req_known")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if len(logger.records) != 1 {
+		t.Fatalf("log records length = %d, want 1", len(logger.records))
+	}
+	got := logger.records[0]
+	if got.RequestID != "req_known" || got.RequestedModel != "gpt-test" || got.ResolvedProvider != "openai_api" || got.ResolvedModel != "gpt-test" {
+		t.Fatalf("log routing metadata = %#v", got)
+	}
+	if got.Stream || got.Status != http.StatusOK || got.RetryCount != 0 || got.LatencyMS < 0 {
+		t.Fatalf("log status metadata = %#v", got)
+	}
+}
+
+func TestChatCompletionsLoggingFailureDoesNotBreakSuccess(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "upstream-token")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id": "chatcmpl-upstream",
+			"object": "chat.completion",
+			"created": 123,
+			"model": "gpt-test",
+			"choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]
+		}`))
+	}))
+	defer upstream.Close()
+
+	handler := NewServer(
+		WithChatRouter(newTestChatRouter(t, upstream.URL)),
+		WithRequestLogger(failingLogger{}),
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","messages":[{"role":"user","content":"hello"}]}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
 func TestChatCompletionsAppliesClientAuth(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "upstream-token")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -263,6 +334,21 @@ func TestChatCompletionsAppliesClientAuth(t *testing.T) {
 	if body.Error.Code != string(ErrorPolicyDenied) {
 		t.Fatalf("error code = %q, want %q", body.Error.Code, ErrorPolicyDenied)
 	}
+}
+
+type recordingLogger struct {
+	records []requestlog.RequestLogRecord
+}
+
+func (l *recordingLogger) LogRequest(ctx context.Context, rec requestlog.RequestLogRecord) error {
+	l.records = append(l.records, rec)
+	return nil
+}
+
+type failingLogger struct{}
+
+func (failingLogger) LogRequest(context.Context, requestlog.RequestLogRecord) error {
+	return errors.New("log failed")
 }
 
 func newTestChatRouter(t *testing.T, upstreamURL string) router.Router {
