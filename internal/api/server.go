@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+
+	"battle-proxy-akira/internal/router"
 )
 
 // Middleware wraps an HTTP handler. Client authentication can be supplied this way.
@@ -13,6 +15,7 @@ type Option func(*serverOptions)
 
 type serverOptions struct {
 	modelLister ModelLister
+	chatRouter  router.Router
 	clientAuth  Middleware
 }
 
@@ -20,6 +23,13 @@ type serverOptions struct {
 func WithModelLister(lister ModelLister) Option {
 	return func(opts *serverOptions) {
 		opts.modelLister = lister
+	}
+}
+
+// WithChatRouter configures the router used by POST /v1/chat/completions.
+func WithChatRouter(chatRouter router.Router) Option {
+	return func(opts *serverOptions) {
+		opts.chatRouter = chatRouter
 	}
 }
 
@@ -49,6 +59,7 @@ func NewServer(options ...Option) http.Handler {
 	mux := http.NewServeMux()
 	RegisterHealthRoutes(mux)
 	RegisterModelRoutes(mux, opts.modelLister, opts.clientAuth)
+	RegisterChatRoutes(mux, opts.chatRouter, opts.clientAuth)
 	return mux
 }
 

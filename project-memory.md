@@ -85,3 +85,10 @@
 - Decision: implement reusable API middleware that treats `static_bearer` and existing `bearer_tokens` as equivalent comma-separated env-var token modes. `none` is an identity middleware for local/dev configs. Missing or invalid client `Authorization: Bearer` headers return OpenAI-style `policy_denied` errors with `WWW-Authenticate`, and middleware construction errors avoid including token values or env var names.
 - Rejected alternatives: supporting only `static_bearer`, because existing config validation/spec examples already allow `bearer_tokens`; logging or echoing env var names in auth setup errors, because names can reveal deployment secret conventions and are not necessary for runtime client errors.
 - Affected area: API client-auth integration, server construction, `/v1/models`, and future chat/responses endpoints.
+
+### Non-streaming Chat Completions endpoint behavior
+
+- Context: `api.chat-nonstream` needed the first end-to-end chat path, while streaming behavior and synthetic fallback are later tasks and usage compatibility can be either omitted or null when unknown.
+- Decision: register `/v1/chat/completions` for all servers and require a configured chat router for successful calls. The handler rejects `stream:true` with `invalid_request` until the streaming API task, parses text-only Chat Completions into IR, resolves routes through the router, uses the first returned candidate only, rewrites provider requests/responses through route metadata, and returns OpenAI-compatible JSON with `usage` omitted when the provider does not return usage.
+- Rejected alternatives: silently treating `stream:true` as non-streaming, because that would violate client expectations; implementing candidate fallback here, because retry/fallback has dedicated router tasks; returning zero token usage when unknown, because omitting unknown usage is allowed by the spec and avoids misleading clients.
+- Affected area: `/v1/chat/completions`, router/API integration, streaming handler follow-up, fallback follow-up, and usage compatibility.
