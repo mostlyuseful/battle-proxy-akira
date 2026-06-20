@@ -12,6 +12,8 @@ import (
 
 	"battle-proxy-akira/internal/api"
 	"battle-proxy-akira/internal/config"
+	requestlog "battle-proxy-akira/internal/logging"
+	"battle-proxy-akira/internal/runtime"
 )
 
 const (
@@ -27,15 +29,57 @@ func main() {
 		os.Exit(1)
 	}
 
-	server := newHTTPServer(cfg.Server, api.NewServer(api.WithServerConfig(cfg.Server)))
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(signals)
+	manager, err := runtime.NewManager(loadRuntimeConfig, nil)
+	if err != nil {
+		slog.Error("build runtime", "error", err)
+		os.Exit(1)
+	}
+
+	clientAuth, err := api.NewClientAuthMiddleware(cfg.ClientAuth)
+	if err != nil {
+		slog.Error("build client auth", "error", err)
+		os.Exit(1)
+	}
+	logger, err := requestlog.New(cfg.Logging)
+	if err != nil {
+		slog.Error("build request logger", "error", err)
+		os.Exit(1)
+	}
+
+	handler := api.NewServer(
+		api.WithChatRouter(manager),
+		api.WithModelLister(api.ModelListerFunc(manager.Models)),
+		api.WithClientAuth(clientAuth),
+		api.WithRequestLogger(logger),
+		api.WithServerConfig(cfg.Server),
+	)
+	server := newHTTPServer(cfg.Server, handler)
+
+	shutdownSignals := make(chan os.Signal, 1)
+	signal.Notify(shutdownSignals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(shutdownSignals)
+
+	reloadSignals := make(chan os.Signal, 1)
+	signal.Notify(reloadSignals, syscall.SIGHUP)
+	defer signal.Stop(reloadSignals)
+	go runReloadLoop(reloadSignals, manager.Reload)
 
 	slog.Info("starting llm proxy", "addr", server.Addr)
-	if err := serve(context.Background(), server, signals, defaultShutdownTimeout); err != nil {
+	if err := serve(context.Background(), server, shutdownSignals, defaultShutdownTimeout); err != nil {
 		slog.Error("server stopped with error", "error", err)
 		os.Exit(1)
+	}
+}
+
+// runReloadLoop triggers a config reload for every received signal until the
+// channel is closed. Reload failures are logged but never terminate the proxy.
+func runReloadLoop(signals <-chan os.Signal, reload func() error) {
+	for range signals {
+		if err := reload(); err != nil {
+			slog.Error("config reload failed", "error", err)
+			continue
+		}
+		slog.Info("config reloaded")
 	}
 }
 

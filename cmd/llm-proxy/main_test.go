@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -154,4 +155,32 @@ func startTestServer(t *testing.T, server *http.Server) (<-chan error, string) {
 		listenErr <- err
 	}()
 	return listenErr, addr
+}
+
+func TestRunReloadLoopInvokesReloadOnSignal(t *testing.T) {
+	t.Parallel()
+
+	signals := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	var calls int32
+	reload := func() error {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 2 {
+			return errors.New("simulated reload failure")
+		}
+		return nil
+	}
+	go func() {
+		runReloadLoop(signals, reload)
+		close(done)
+	}()
+
+	signals <- syscall.SIGHUP
+	signals <- syscall.SIGHUP
+	close(signals)
+	<-done
+
+	if calls != 2 {
+		t.Fatalf("reload calls = %d, want 2", calls)
+	}
 }

@@ -190,6 +190,15 @@ func (r *StaticRouter) IsCandidateAvailable(candidate RouteCandidate, at time.Ti
 	return r.availability.IsAvailable(candidate.ProviderName, candidate.ProviderModel, at)
 }
 
+// RestoreAvailability replaces tracked availability state with the given snapshots.
+// Used during config reload to reconcile state for unchanged provider/model pairs.
+func (r *StaticRouter) RestoreAvailability(states []AvailabilityState) {
+	if r.availability == nil {
+		r.availability = NewAvailabilityTracker()
+	}
+	r.availability.Restore(states)
+}
+
 func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.SyntheticModelConfig, requiredModalities []string) ([]RouteCandidate, error) {
 	if synthetic.Strategy != config.SyntheticStrategyFirstAvailable {
 		return nil, &Error{Code: ErrorNoAvailableModel, Message: fmt.Sprintf("synthetic model %q uses unsupported strategy %q", alias, synthetic.Strategy), Param: "model"}

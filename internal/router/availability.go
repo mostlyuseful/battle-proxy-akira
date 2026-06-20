@@ -145,6 +145,23 @@ func exponentialBackoff(failures int) time.Duration {
 	return backoff
 }
 
+// Restore replaces all tracked availability states with clones of the given states.
+// It is used during config reload to preserve availability for unchanged provider/model pairs.
+func (t *AvailabilityTracker) Restore(states []AvailabilityState) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.states = map[availabilityKey]AvailabilityState{}
+	for _, state := range states {
+		if state.Provider == "" || state.Model == "" {
+			continue
+		}
+		t.states[availabilityKey{provider: state.Provider, model: state.Model}] = cloneAvailabilityState(state)
+	}
+}
+
 // IsAvailable reports whether a provider/model is not in an active exhaustion window.
 func (t *AvailabilityTracker) IsAvailable(providerName, modelName string, at time.Time) bool {
 	if t == nil {
