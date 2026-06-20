@@ -305,6 +305,31 @@ func TestResolveHonorsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestResolveSyntheticModelLazyDiscoversOfflineCandidatesInOrder(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfigWithSynthetic()
+	cfg.Providers["codex_sub"] = config.ProviderConfig{}
+	cfg.Providers["openai_api"] = config.ProviderConfig{}
+	first := &lazyDiscoveryProvider{name: "codex_sub", err: errors.New("offline")}
+	second := &lazyDiscoveryProvider{name: "openai_api", models: []ir.Model{{ID: "gpt-5.2", Provider: "openai_api", Modalities: []string{ir.ModalityText, ir.ModalityImage}}}}
+	r := NewStatic(cfg, map[string]provider.Provider{
+		"codex_sub":  first,
+		"openai_api": second,
+	})
+
+	candidates, err := r.Resolve(context.Background(), ir.Request{Model: "coding"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ProviderName != "openai_api" || candidates[0].ProviderModel != "gpt-5.2" {
+		t.Fatalf("candidates = %#v", candidates)
+	}
+	if first.calls != 1 || second.calls != 1 {
+		t.Fatalf("discovery calls first=%d second=%d, want 1/1", first.calls, second.calls)
+	}
+}
+
 func TestResolveSyntheticModelAliasInConfiguredOrder(t *testing.T) {
 	t.Parallel()
 
@@ -335,6 +360,21 @@ func TestResolveSyntheticModelAliasInConfiguredOrder(t *testing.T) {
 			t.Fatalf("Synthetic = false for candidate %#v", candidate)
 		}
 	}
+}
+
+func TestResolveSyntheticModelReturnsNoAvailableWhenAllOfflineDiscoveryFails(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfigWithSynthetic()
+	cfg.Providers["codex_sub"] = config.ProviderConfig{}
+	cfg.Providers["openai_api"] = config.ProviderConfig{}
+	r := NewStatic(cfg, map[string]provider.Provider{
+		"codex_sub":  &lazyDiscoveryProvider{name: "codex_sub", err: errors.New("offline")},
+		"openai_api": &lazyDiscoveryProvider{name: "openai_api", err: errors.New("offline")},
+	})
+
+	_, err := r.Resolve(context.Background(), ir.Request{Model: "coding"})
+	assertRouterError(t, err, ErrorNoAvailableModel)
 }
 
 func TestResolveSyntheticModelSkipsMissingProviderInstances(t *testing.T) {

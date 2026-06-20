@@ -112,7 +112,7 @@ func (r *StaticRouter) Resolve(ctx context.Context, req ir.Request) ([]RouteCand
 	synthetic, ok := r.cfg.SyntheticModels[model]
 	r.mu.RUnlock()
 	if ok {
-		return r.resolveSyntheticModel(model, synthetic, requiredModalities)
+		return r.resolveSyntheticModel(ctx, model, synthetic, requiredModalities)
 	}
 	return r.resolveDirectModel(ctx, model, requiredModalities)
 }
@@ -230,7 +230,7 @@ func (r *StaticRouter) RestoreAvailability(states []AvailabilityState) {
 	}
 }
 
-func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.SyntheticModelConfig, requiredModalities []string) ([]RouteCandidate, error) {
+func (r *StaticRouter) resolveSyntheticModel(ctx context.Context, alias string, synthetic config.SyntheticModelConfig, requiredModalities []string) ([]RouteCandidate, error) {
 	if synthetic.Strategy != config.SyntheticStrategyFirstAvailable {
 		if r.logger != nil {
 			r.logger.Warn("synthetic model rejected", "model", alias, "strategy", synthetic.Strategy, "reason", "unsupported_strategy")
@@ -242,6 +242,7 @@ func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.Synt
 	missingProviders := 0
 	unavailableCandidates := 0
 	unsupportedModalities := 0
+	discoveryFailures := 0
 	for _, candidate := range synthetic.Candidates {
 		providerName, providerModel, ok := strings.Cut(candidate, ":")
 		if !ok || providerName == "" || providerModel == "" {
@@ -261,10 +262,23 @@ func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.Synt
 		}
 		modelCfg, ok := providerCfg.Models[providerModel]
 		if !ok {
-			if r.logger != nil {
-				r.logger.Warn("synthetic candidate rejected", "synthetic_model", alias, "candidate", candidate, "reason", "unknown_model", "provider", providerName, "model", providerModel)
+			if len(providerCfg.Models) == 0 {
+				providerCfg, _ = r.refreshProviderModels(ctx, providerName)
+				modelCfg, ok = providerCfg.Models[providerModel]
 			}
-			return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("synthetic model %q references unknown model %q for provider %q", alias, providerModel, providerName), Param: "model"}
+			if !ok {
+				if len(providerCfg.Models) == 0 {
+					discoveryFailures++
+					if r.logger != nil {
+						r.logger.Info("synthetic candidate skipped", "synthetic_model", alias, "candidate", candidate, "reason", "provider_offline_or_undiscovered", "provider", providerName)
+					}
+					continue
+				}
+				if r.logger != nil {
+					r.logger.Warn("synthetic candidate rejected", "synthetic_model", alias, "candidate", candidate, "reason", "unknown_model", "provider", providerName, "model", providerModel)
+				}
+				return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("synthetic model %q references unknown model %q for provider %q", alias, providerModel, providerName), Param: "model"}
+			}
 		}
 		if !supportsModalities(modelCfg.Modalities, requiredModalities) {
 			unsupportedModalities++
@@ -305,11 +319,11 @@ func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.Synt
 		if unsupportedModalities > 0 {
 			code = ErrorUnsupportedModality
 			message = fmt.Sprintf("synthetic model %q does not support requested modalities", alias)
-		} else if missingProviders > 0 || unavailableCandidates > 0 {
+		} else if missingProviders > 0 || unavailableCandidates > 0 || discoveryFailures > 0 {
 			code = ErrorNoAvailableModel
 		}
 		if r.logger != nil {
-			r.logger.Warn("synthetic model has no available candidates", "model", alias, "reason", message, "unsupported_modalities", unsupportedModalities, "missing_providers", missingProviders, "unavailable_candidates", unavailableCandidates)
+			r.logger.Warn("synthetic model has no available candidates", "model", alias, "reason", message, "unsupported_modalities", unsupportedModalities, "missing_providers", missingProviders, "unavailable_candidates", unavailableCandidates, "discovery_failures", discoveryFailures)
 		}
 		return nil, &Error{Code: code, Message: message, Param: "model"}
 	}
