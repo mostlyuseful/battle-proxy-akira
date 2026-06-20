@@ -98,6 +98,88 @@ func TestResolveDirectModelIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestResolveTextOnlyRequestCanUseTextModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewStatic(testConfig(), map[string]provider.Provider{
+		"codex_sub": fakeProvider{name: "codex_sub"},
+	})
+
+	candidates, err := r.Resolve(context.Background(), ir.Request{
+		Model:    "codex_sub:gpt-5.1-codex-max",
+		Messages: []ir.Message{{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "hello"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ProviderName != "codex_sub" {
+		t.Fatalf("candidates = %#v, want codex_sub text model", candidates)
+	}
+}
+
+func TestResolveImageRequestUsesImageCapableDirectModel(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.Providers["a_text"] = config.ProviderConfig{Models: map[string]config.ModelConfig{"shared": {Modalities: []string{ir.ModalityText}}}}
+	cfg.Providers["z_vision"] = config.ProviderConfig{Models: map[string]config.ModelConfig{"shared": {Modalities: []string{ir.ModalityText, ir.ModalityImage}}}}
+	r := NewStatic(cfg, map[string]provider.Provider{
+		"a_text":   fakeProvider{name: "a_text"},
+		"z_vision": fakeProvider{name: "z_vision"},
+	})
+
+	candidates, err := r.Resolve(context.Background(), imageRequest("shared"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ProviderName != "z_vision" {
+		t.Fatalf("candidates = %#v, want z_vision image-capable model", candidates)
+	}
+}
+
+func TestResolveImageRequestFiltersSyntheticCandidates(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfigWithSynthetic()
+	r := NewStatic(cfg, map[string]provider.Provider{
+		"codex_sub":  fakeProvider{name: "codex_sub"},
+		"openai_api": fakeProvider{name: "openai_api"},
+	})
+
+	candidates, err := r.Resolve(context.Background(), imageRequest("coding"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ProviderName != "openai_api" || candidates[0].ProviderModel != "gpt-5.2" {
+		t.Fatalf("candidates = %#v, want only openai_api gpt-5.2", candidates)
+	}
+}
+
+func TestResolveImageRequestUnsupportedModality(t *testing.T) {
+	t.Parallel()
+
+	r := NewStatic(testConfig(), map[string]provider.Provider{
+		"codex_sub": fakeProvider{name: "codex_sub"},
+	})
+
+	_, err := r.Resolve(context.Background(), imageRequest("codex_sub:gpt-5.1-codex-max"))
+	assertRouterError(t, err, ErrorUnsupportedModality)
+}
+
+func TestResolveMissingModalityMetadataIsTextOnly(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.Providers["legacy"] = config.ProviderConfig{Models: map[string]config.ModelConfig{"legacy-model": {}}}
+	r := NewStatic(cfg, map[string]provider.Provider{"legacy": fakeProvider{name: "legacy"}})
+
+	if _, err := r.Resolve(context.Background(), ir.Request{Model: "legacy-model"}); err != nil {
+		t.Fatalf("Resolve text request with missing modalities: %v", err)
+	}
+	_, err := r.Resolve(context.Background(), imageRequest("legacy-model"))
+	assertRouterError(t, err, ErrorUnsupportedModality)
+}
+
 func TestResolveUnknownModel(t *testing.T) {
 	t.Parallel()
 
@@ -248,6 +330,19 @@ func TestResolveUnknownAliasFallsThroughToUnknownModel(t *testing.T) {
 
 	_, err := r.Resolve(context.Background(), ir.Request{Model: "unknown_alias"})
 	assertRouterError(t, err, ErrorUnknownModel)
+}
+
+func imageRequest(model string) ir.Request {
+	return ir.Request{
+		Model: model,
+		Messages: []ir.Message{{
+			Role: ir.RoleUser,
+			Content: []ir.ContentPart{
+				{Type: ir.ContentTypeText, Text: "describe"},
+				{Type: ir.ContentTypeImageURL, ImageURL: "data:image/png;base64,abc"},
+			},
+		}},
+	}
 }
 
 func assertRouterError(t *testing.T, err error, wantCode string) {

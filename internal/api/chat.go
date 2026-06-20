@@ -180,6 +180,8 @@ func proxyErrorFromRouterError(err error) *ProxyError {
 			return NewProxyError(ErrorUnknownModel, routerErr.Message, routerErr.Param)
 		case router.ErrorNoAvailableModel:
 			return NewProxyError(ErrorNoAvailableModel, routerErr.Message, routerErr.Param)
+		case router.ErrorUnsupportedModality:
+			return NewProxyError(ErrorUnsupportedModality, routerErr.Message, routerErr.Param)
 		}
 		return NewProxyError(ErrorNoAvailableModel, routerErr.Message, routerErr.Param)
 	}

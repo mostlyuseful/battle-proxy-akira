@@ -242,6 +242,37 @@ func TestChatCompletionsErrors(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsImageRequestUnsupportedModality(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "upstream-token")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("upstream should not be called for unsupported modality")
+	}))
+	defer upstream.Close()
+
+	handler := NewServer(WithChatRouter(newTestChatRouter(t, upstream.URL)))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-test",
+		"messages":[{"role":"user","content":[
+			{"type":"text","text":"describe"},
+			{"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}
+		]}]
+	}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status code = %d, want %d, body %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	var body OpenAIErrorResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if body.Error.Code != string(ErrorUnsupportedModality) {
+		t.Fatalf("error code = %q, want %q", body.Error.Code, ErrorUnsupportedModality)
+	}
+}
+
 func TestChatCompletionsFailureLogDoesNotContainBearerOrAPIKey(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-upstream-secret-token")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

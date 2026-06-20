@@ -17,6 +17,8 @@ const (
 	ErrorUnknownModel = "unknown_model"
 	// ErrorNoAvailableModel means the model exists in config but cannot be routed to an available provider.
 	ErrorNoAvailableModel = "no_available_model"
+	// ErrorUnsupportedModality means the model exists but cannot support the request modalities.
+	ErrorUnsupportedModality = "unsupported_modality"
 )
 
 // Error describes a routing failure with a stable internal code.
@@ -85,13 +87,14 @@ func (r *StaticRouter) Resolve(ctx context.Context, req ir.Request) ([]RouteCand
 		return nil, &Error{Code: ErrorUnknownModel, Message: "model is required", Param: "model"}
 	}
 
+	requiredModalities := req.InputModalities()
 	if providerName, providerModel, ok := strings.Cut(model, ":"); ok {
-		return r.resolveProviderModel(providerName, providerModel, model)
+		return r.resolveProviderModel(providerName, providerModel, model, requiredModalities)
 	}
 	if synthetic, ok := r.cfg.SyntheticModels[model]; ok {
-		return r.resolveSyntheticModel(model, synthetic)
+		return r.resolveSyntheticModel(model, synthetic, requiredModalities)
 	}
-	return r.resolveDirectModel(model)
+	return r.resolveDirectModel(model, requiredModalities)
 }
 
 // Models returns configured direct models plus exposed synthetic aliases.
@@ -153,13 +156,14 @@ func (r *StaticRouter) MarkFailure(candidate RouteCandidate, err error) {}
 // MarkSuccess is a no-op for the static router. Later routers add fallback and circuit state.
 func (r *StaticRouter) MarkSuccess(candidate RouteCandidate) {}
 
-func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.SyntheticModelConfig) ([]RouteCandidate, error) {
+func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.SyntheticModelConfig, requiredModalities []string) ([]RouteCandidate, error) {
 	if synthetic.Strategy != config.SyntheticStrategyFirstAvailable {
 		return nil, &Error{Code: ErrorNoAvailableModel, Message: fmt.Sprintf("synthetic model %q uses unsupported strategy %q", alias, synthetic.Strategy), Param: "model"}
 	}
 
 	candidates := make([]RouteCandidate, 0, len(synthetic.Candidates))
 	missingProviders := 0
+	unsupportedModalities := 0
 	for _, candidate := range synthetic.Candidates {
 		providerName, providerModel, ok := strings.Cut(candidate, ":")
 		if !ok || providerName == "" || providerModel == "" {
@@ -169,8 +173,13 @@ func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.Synt
 		if !ok {
 			return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("synthetic model %q references unknown provider %q", alias, providerName), Param: "model"}
 		}
-		if _, ok := providerCfg.Models[providerModel]; !ok {
+		modelCfg, ok := providerCfg.Models[providerModel]
+		if !ok {
 			return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("synthetic model %q references unknown model %q for provider %q", alias, providerModel, providerName), Param: "model"}
+		}
+		if !supportsModalities(modelCfg.Modalities, requiredModalities) {
+			unsupportedModalities++
+			continue
 		}
 		p, ok := r.providers[providerName]
 		if !ok || p == nil {
@@ -187,15 +196,19 @@ func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.Synt
 	}
 	if len(candidates) == 0 {
 		code := ErrorUnknownModel
-		if missingProviders > 0 {
+		message := fmt.Sprintf("no available provider for synthetic model %q", alias)
+		if unsupportedModalities > 0 {
+			code = ErrorUnsupportedModality
+			message = fmt.Sprintf("synthetic model %q does not support requested modalities", alias)
+		} else if missingProviders > 0 {
 			code = ErrorNoAvailableModel
 		}
-		return nil, &Error{Code: code, Message: fmt.Sprintf("no available provider for synthetic model %q", alias), Param: "model"}
+		return nil, &Error{Code: code, Message: message, Param: "model"}
 	}
 	return candidates, nil
 }
 
-func (r *StaticRouter) resolveProviderModel(providerName, providerModel, requestedModel string) ([]RouteCandidate, error) {
+func (r *StaticRouter) resolveProviderModel(providerName, providerModel, requestedModel string, requiredModalities []string) ([]RouteCandidate, error) {
 	providerName = strings.TrimSpace(providerName)
 	providerModel = strings.TrimSpace(providerModel)
 	if providerName == "" || providerModel == "" {
@@ -205,19 +218,35 @@ func (r *StaticRouter) resolveProviderModel(providerName, providerModel, request
 	if !ok {
 		return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("unknown provider %q for model %q", providerName, requestedModel), Param: "model"}
 	}
-	if _, ok := providerCfg.Models[providerModel]; !ok {
+	modelCfg, ok := providerCfg.Models[providerModel]
+	if !ok {
 		return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("unknown model %q for provider %q", providerModel, providerName), Param: "model"}
+	}
+	if !supportsModalities(modelCfg.Modalities, requiredModalities) {
+		return nil, &Error{Code: ErrorUnsupportedModality, Message: fmt.Sprintf("model %q for provider %q does not support requested modalities", providerModel, providerName), Param: "model"}
 	}
 	return r.candidate(providerName, providerModel, requestedModel)
 }
 
-func (r *StaticRouter) resolveDirectModel(model string) ([]RouteCandidate, error) {
+func (r *StaticRouter) resolveDirectModel(model string, requiredModalities []string) ([]RouteCandidate, error) {
 	providerNames := sortedProviderNames(r.cfg.Providers)
+	foundModel := false
+	unsupportedModalities := 0
 	for _, providerName := range providerNames {
 		providerCfg := r.cfg.Providers[providerName]
-		if _, ok := providerCfg.Models[model]; ok {
-			return r.candidate(providerName, model, model)
+		modelCfg, ok := providerCfg.Models[model]
+		if !ok {
+			continue
 		}
+		foundModel = true
+		if !supportsModalities(modelCfg.Modalities, requiredModalities) {
+			unsupportedModalities++
+			continue
+		}
+		return r.candidate(providerName, model, model)
+	}
+	if foundModel && unsupportedModalities > 0 {
+		return nil, &Error{Code: ErrorUnsupportedModality, Message: fmt.Sprintf("model %q does not support requested modalities", model), Param: "model"}
 	}
 	return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("unknown model %q", model), Param: "model"}
 }
@@ -235,6 +264,24 @@ func (r *StaticRouter) candidate(providerName, providerModel, requestedModel str
 			Provider:       p,
 		},
 	}, nil
+}
+
+func supportsModalities(configured []string, required []string) bool {
+	configuredSet := map[string]bool{}
+	for _, modality := range configured {
+		configuredSet[modality] = true
+	}
+	// Missing modality metadata is treated as text-only: it can serve legacy
+	// text requests but must not receive image requests without explicit image support.
+	if len(configuredSet) == 0 {
+		configuredSet[ir.ModalityText] = true
+	}
+	for _, modality := range required {
+		if !configuredSet[modality] {
+			return false
+		}
+	}
+	return true
 }
 
 func sortedProviderNames(providers map[string]config.ProviderConfig) []string {
