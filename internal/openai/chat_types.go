@@ -73,6 +73,37 @@ type ChatCompletionUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
+// ChatCompletionRequestFromIR converts a provider-neutral request to an OpenAI-compatible request.
+func ChatCompletionRequestFromIR(req ir.Request) (ChatCompletionRequest, error) {
+	messages := make([]ChatMessage, 0, len(req.Messages))
+	for i, message := range req.Messages {
+		chatMessage := ChatMessage{Role: message.Role}
+		for _, part := range message.Content {
+			if part.Type != ir.ContentTypeText {
+				return ChatCompletionRequest{}, fmt.Errorf("chat message %d contains unsupported content part type %q", i, part.Type)
+			}
+			chatMessage.Content.Text += part.Text
+		}
+		messages = append(messages, chatMessage)
+	}
+
+	return ChatCompletionRequest{
+		Model:               req.Model,
+		Messages:            messages,
+		Temperature:         req.Params.Temperature,
+		TopP:                req.Params.TopP,
+		MaxTokens:           req.Params.MaxTokens,
+		MaxCompletionTokens: req.Params.MaxCompletionTokens,
+		Stop:                StopSequences(req.Params.Stop),
+		PresencePenalty:     req.Params.PresencePenalty,
+		FrequencyPenalty:    req.Params.FrequencyPenalty,
+		Seed:                req.Params.Seed,
+		Stream:              req.Stream,
+		Extra:               cloneRawMap(req.Extra),
+		RawBody:             append(json.RawMessage(nil), req.RawBody...),
+	}, nil
+}
+
 // ParseChatCompletionRequest decodes a request body, preserving raw JSON and unknown top-level fields.
 func ParseChatCompletionRequest(body []byte) (*ChatCompletionRequest, error) {
 	var req ChatCompletionRequest
@@ -102,6 +133,75 @@ func ParseChatCompletionRequest(body []byte) (*ChatCompletionRequest, error) {
 	}
 	req.Extra = fields
 	return &req, nil
+}
+
+// MarshalJSON encodes known request fields plus preserved unknown top-level fields.
+func (r ChatCompletionRequest) MarshalJSON() ([]byte, error) {
+	fields := cloneRawMap(r.Extra)
+	if fields == nil {
+		fields = map[string]json.RawMessage{}
+	}
+	put := func(key string, value any) error {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		fields[key] = encoded
+		return nil
+	}
+
+	if err := put("model", r.Model); err != nil {
+		return nil, err
+	}
+	if err := put("messages", r.Messages); err != nil {
+		return nil, err
+	}
+	if r.Temperature != nil {
+		if err := put("temperature", r.Temperature); err != nil {
+			return nil, err
+		}
+	}
+	if r.TopP != nil {
+		if err := put("top_p", r.TopP); err != nil {
+			return nil, err
+		}
+	}
+	if r.MaxTokens != nil {
+		if err := put("max_tokens", r.MaxTokens); err != nil {
+			return nil, err
+		}
+	}
+	if r.MaxCompletionTokens != nil {
+		if err := put("max_completion_tokens", r.MaxCompletionTokens); err != nil {
+			return nil, err
+		}
+	}
+	if len(r.Stop) > 0 {
+		if err := put("stop", r.Stop); err != nil {
+			return nil, err
+		}
+	}
+	if r.PresencePenalty != nil {
+		if err := put("presence_penalty", r.PresencePenalty); err != nil {
+			return nil, err
+		}
+	}
+	if r.FrequencyPenalty != nil {
+		if err := put("frequency_penalty", r.FrequencyPenalty); err != nil {
+			return nil, err
+		}
+	}
+	if r.Seed != nil {
+		if err := put("seed", r.Seed); err != nil {
+			return nil, err
+		}
+	}
+	if r.Stream {
+		if err := put("stream", r.Stream); err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(fields)
 }
 
 // ToIR normalizes a Chat Completions request to the provider-neutral IR.
@@ -148,6 +248,29 @@ func (r ChatCompletionRequest) ToIR() (ir.Request, error) {
 	}, nil
 }
 
+// ToIR converts an OpenAI-compatible Chat Completions response to provider-neutral IR.
+func (r ChatCompletionResponse) ToIR(raw json.RawMessage) (ir.Response, error) {
+	if len(r.Choices) == 0 {
+		return ir.Response{}, errors.New("chat completion response contains no choices")
+	}
+	choice := r.Choices[0]
+	resp := ir.Response{
+		ID:           r.ID,
+		Model:        r.Model,
+		Message:      chatMessageToIR(choice.Message),
+		FinishReason: choice.FinishReason,
+		RawBody:      append(json.RawMessage(nil), raw...),
+	}
+	if r.Usage != nil {
+		resp.Usage = &ir.Usage{
+			PromptTokens:     r.Usage.PromptTokens,
+			CompletionTokens: r.Usage.CompletionTokens,
+			TotalTokens:      r.Usage.TotalTokens,
+		}
+	}
+	return resp, nil
+}
+
 // ChatCompletionResponseFromIR converts a normalized response to an OpenAI-compatible response.
 func ChatCompletionResponseFromIR(resp ir.Response, created time.Time) ChatCompletionResponse {
 	out := ChatCompletionResponse{
@@ -171,6 +294,18 @@ func ChatCompletionResponseFromIR(resp ir.Response, created time.Time) ChatCompl
 		}
 	}
 	return out
+}
+
+func chatMessageToIR(message ChatMessage) ir.Message {
+	return ir.Message{
+		Role: message.Role,
+		Content: []ir.ContentPart{
+			{
+				Type: ir.ContentTypeText,
+				Text: message.Content.Text,
+			},
+		},
+	}
 }
 
 // ChatMessageFromIR converts a text IR message to an OpenAI-compatible chat message.

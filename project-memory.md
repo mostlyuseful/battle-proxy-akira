@@ -36,3 +36,10 @@
 - Decision: parse Chat Completions with custom stdlib JSON types that preserve raw body and unknown top-level/message fields; support simple string `content` only for now and return a clear decode error for multimodal content arrays; normalize `stop` string or array into IR `[]string`; provide minimal non-streaming response structs and IR-to-Chat response conversion.
 - Rejected alternatives: accepting and partially ignoring multimodal content arrays before modality support exists, because that could silently drop images; modeling every OpenAI request/response field now, because unknown fields can be preserved without expanding MVP scope.
 - Affected area: OpenAI edge parsing, future image content parsing, provider request forwarding, and Chat Completions response rendering.
+
+### OpenAI-compatible provider MVP behavior
+
+- Context: `provider.openai-nonstream` required an MVP provider interface and non-streaming adapter, but streaming, retries, circuit breaking, and provider-specific error parsing are later tasks.
+- Decision: define the full provider-neutral interface now (`Name`, `Complete`, `Stream`, `Models`, `Health`) but implement only non-streaming `Complete` for OpenAI-compatible providers; `Stream` returns `ErrStreamingUnsupported`, `Models` returns configured model metadata, and `Health` only checks context for now. `Complete` builds a fresh Chat Completions body from IR, forces `stream=false`, appends `/chat/completions` to the configured `base_url`, forwards preserved unknown top-level fields, and does not include upstream error bodies in returned status errors.
+- Rejected alternatives: reusing the raw incoming request body as-is, because synthetic model resolution and stream forcing need controlled mutation; fetching live upstream `/models` in this task, because static config is enough for the first non-streaming provider and live discovery is out of scope.
+- Affected area: provider adapter contract, router integration, future streaming provider work, and upstream error handling.
