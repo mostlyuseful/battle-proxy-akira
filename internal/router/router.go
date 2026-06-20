@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"battle-proxy-akira/internal/config"
@@ -67,6 +68,7 @@ type Router interface {
 
 // StaticRouter resolves configured direct models and first_available synthetic aliases.
 type StaticRouter struct {
+	mu           sync.RWMutex
 	cfg          config.Config
 	providers    map[string]provider.Provider
 	availability *AvailabilityTracker
@@ -104,12 +106,15 @@ func (r *StaticRouter) Resolve(ctx context.Context, req ir.Request) ([]RouteCand
 		r.logger.Info("resolving model", "requested_model", model, "modalities", requiredModalities)
 	}
 	if providerName, providerModel, ok := strings.Cut(model, ":"); ok {
-		return r.resolveProviderModel(providerName, providerModel, model, requiredModalities)
+		return r.resolveProviderModel(ctx, providerName, providerModel, model, requiredModalities)
 	}
-	if synthetic, ok := r.cfg.SyntheticModels[model]; ok {
+	r.mu.RLock()
+	synthetic, ok := r.cfg.SyntheticModels[model]
+	r.mu.RUnlock()
+	if ok {
 		return r.resolveSyntheticModel(model, synthetic, requiredModalities)
 	}
-	return r.resolveDirectModel(model, requiredModalities)
+	return r.resolveDirectModel(ctx, model, requiredModalities)
 }
 
 // Models returns configured direct models plus exposed synthetic aliases.
@@ -118,9 +123,13 @@ func (r *StaticRouter) Models(ctx context.Context) ([]ir.Model, error) {
 		return nil, err
 	}
 
+	r.mu.RLock()
+	cfg := r.cfg
+	r.mu.RUnlock()
+
 	modelsByID := map[string]ir.Model{}
-	for _, providerName := range sortedProviderNames(r.cfg.Providers) {
-		providerCfg := r.cfg.Providers[providerName]
+	for _, providerName := range sortedProviderNames(cfg.Providers) {
+		providerCfg := cfg.Providers[providerName]
 		modelNames := sortedModelNames(providerCfg.Models)
 		for _, modelName := range modelNames {
 			modelCfg := providerCfg.Models[modelName]
@@ -136,8 +145,8 @@ func (r *StaticRouter) Models(ctx context.Context) ([]ir.Model, error) {
 		}
 	}
 
-	for _, alias := range sortedSyntheticNames(r.cfg.SyntheticModels) {
-		synthetic := r.cfg.SyntheticModels[alias]
+	for _, alias := range sortedSyntheticNames(cfg.SyntheticModels) {
+		synthetic := cfg.SyntheticModels[alias]
 		if !synthetic.Expose {
 			continue
 		}
@@ -241,7 +250,9 @@ func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.Synt
 			}
 			return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("synthetic model %q contains invalid candidate %q", alias, candidate), Param: "model"}
 		}
+		r.mu.RLock()
 		providerCfg, ok := r.cfg.Providers[providerName]
+		r.mu.RUnlock()
 		if !ok {
 			if r.logger != nil {
 				r.logger.Warn("synthetic candidate rejected", "synthetic_model", alias, "candidate", candidate, "reason", "unknown_provider", "provider", providerName)
@@ -308,7 +319,7 @@ func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.Synt
 	return candidates, nil
 }
 
-func (r *StaticRouter) resolveProviderModel(providerName, providerModel, requestedModel string, requiredModalities []string) ([]RouteCandidate, error) {
+func (r *StaticRouter) resolveProviderModel(ctx context.Context, providerName, providerModel, requestedModel string, requiredModalities []string) ([]RouteCandidate, error) {
 	providerName = strings.TrimSpace(providerName)
 	providerModel = strings.TrimSpace(providerModel)
 	if providerName == "" || providerModel == "" {
@@ -317,7 +328,10 @@ func (r *StaticRouter) resolveProviderModel(providerName, providerModel, request
 		}
 		return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("unknown model %q", requestedModel), Param: "model"}
 	}
+
+	r.mu.RLock()
 	providerCfg, ok := r.cfg.Providers[providerName]
+	r.mu.RUnlock()
 	if !ok {
 		if r.logger != nil {
 			r.logger.Warn("provider-qualified model rejected", "requested_model", requestedModel, "provider", providerName, "reason", "unknown_provider")
@@ -325,10 +339,21 @@ func (r *StaticRouter) resolveProviderModel(providerName, providerModel, request
 		return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("unknown provider %q for model %q", providerName, requestedModel), Param: "model"}
 	}
 	if _, ok := providerCfg.Models[providerModel]; !ok {
-		if r.logger != nil {
-			r.logger.Warn("provider-qualified model rejected", "requested_model", requestedModel, "provider", providerName, "model", providerModel, "reason", "unknown_model")
+		if len(providerCfg.Models) == 0 {
+			providerCfg, _ = r.refreshProviderModels(ctx, providerName)
 		}
-		return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("unknown model %q for provider %q", providerModel, providerName), Param: "model"}
+		if _, ok := providerCfg.Models[providerModel]; !ok {
+			if len(providerCfg.Models) == 0 {
+				if r.logger != nil {
+					r.logger.Warn("provider-qualified model unavailable", "requested_model", requestedModel, "provider", providerName, "model", providerModel, "reason", "provider_offline_or_undiscovered")
+				}
+				return nil, &Error{Code: ErrorNoAvailableModel, Message: fmt.Sprintf("provider %q is unavailable", providerName), Param: "model"}
+			}
+			if r.logger != nil {
+				r.logger.Warn("provider-qualified model rejected", "requested_model", requestedModel, "provider", providerName, "model", providerModel, "reason", "unknown_model")
+			}
+			return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("unknown model %q for provider %q", providerModel, providerName), Param: "model"}
+		}
 	}
 	if r.availability != nil && !r.availability.IsAvailable(providerName, providerModel, time.Now()) {
 		if r.logger != nil {
@@ -339,14 +364,28 @@ func (r *StaticRouter) resolveProviderModel(providerName, providerModel, request
 	return r.candidate(providerName, providerModel, requestedModel)
 }
 
-func (r *StaticRouter) resolveDirectModel(model string, requiredModalities []string) ([]RouteCandidate, error) {
+func (r *StaticRouter) resolveDirectModel(ctx context.Context, model string, requiredModalities []string) ([]RouteCandidate, error) {
+	r.mu.RLock()
 	providerNames := sortedProviderNames(r.cfg.Providers)
+	r.mu.RUnlock()
 	foundModel := false
 	unavailableCandidates := 0
+	discoveryFailures := 0
 	for _, providerName := range providerNames {
+		r.mu.RLock()
 		providerCfg := r.cfg.Providers[providerName]
+		r.mu.RUnlock()
 		if _, ok := providerCfg.Models[model]; !ok {
-			continue
+			if len(providerCfg.Models) == 0 {
+				refreshed, err := r.refreshProviderModels(ctx, providerName)
+				if err != nil {
+					discoveryFailures++
+				}
+				providerCfg = refreshed
+			}
+			if _, ok := providerCfg.Models[model]; !ok {
+				continue
+			}
 		}
 		foundModel = true
 		if r.availability != nil && !r.availability.IsAvailable(providerName, model, time.Now()) {
@@ -364,6 +403,12 @@ func (r *StaticRouter) resolveDirectModel(model string, requiredModalities []str
 	if foundModel && unavailableCandidates > 0 {
 		if r.logger != nil {
 			r.logger.Info("direct model rejected", "model", model, "reason", "unavailable", "unavailable_candidates", unavailableCandidates)
+		}
+		return nil, &Error{Code: ErrorNoAvailableModel, Message: fmt.Sprintf("model %q is temporarily unavailable", model), Param: "model"}
+	}
+	if discoveryFailures > 0 {
+		if r.logger != nil {
+			r.logger.Info("model unavailable after lazy discovery attempts", "model", model, "discovery_failures", discoveryFailures)
 		}
 		return nil, &Error{Code: ErrorNoAvailableModel, Message: fmt.Sprintf("model %q is temporarily unavailable", model), Param: "model"}
 	}
@@ -393,6 +438,48 @@ func (r *StaticRouter) candidate(providerName, providerModel, requestedModel str
 		r.logger.Info("route candidate selected", "provider", providerName, "model", providerModel, "requested_model", requestedModel)
 	}
 	return candidates, nil
+}
+
+func (r *StaticRouter) refreshProviderModels(ctx context.Context, providerName string) (config.ProviderConfig, error) {
+	r.mu.RLock()
+	providerCfg, ok := r.cfg.Providers[providerName]
+	p := r.providers[providerName]
+	r.mu.RUnlock()
+	if !ok {
+		return config.ProviderConfig{}, fmt.Errorf("unknown provider")
+	}
+	if len(providerCfg.Models) > 0 {
+		return providerCfg, nil
+	}
+	if p == nil {
+		return providerCfg, fmt.Errorf("provider is not configured")
+	}
+	models, err := p.Models(ctx)
+	if err != nil {
+		if r.logger != nil {
+			r.logger.Warn("lazy provider model discovery failed", "provider", providerName, "error", err)
+		}
+		return providerCfg, err
+	}
+	providerCfg.Models = make(map[string]config.ModelConfig, len(models))
+	for _, model := range models {
+		providerCfg.Models[model.ID] = config.ModelConfig{Modalities: append([]string(nil), model.Modalities...)}
+	}
+
+	r.mu.Lock()
+	current := r.cfg.Providers[providerName]
+	if len(current.Models) == 0 {
+		current.Models = providerCfg.Models
+		r.cfg.Providers[providerName] = current
+		providerCfg = current
+	} else {
+		providerCfg = current
+	}
+	r.mu.Unlock()
+	if r.logger != nil {
+		r.logger.Info("lazy provider model discovery succeeded", "provider", providerName, "models", len(providerCfg.Models))
+	}
+	return providerCfg, nil
 }
 
 func supportsModalities(configured []string, required []string) bool {

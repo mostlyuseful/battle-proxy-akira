@@ -171,13 +171,16 @@ func buildProviders(cfg config.Config, httpClient *http.Client, logger *slog.Log
 		if len(providerCfg.Models) == 0 {
 			models, err := p.Models(context.Background())
 			if err != nil {
-				return nil, fmt.Errorf("provider %q model discovery failed: %w", name, err)
+				if logger != nil {
+					logger.Warn("provider model discovery failed during startup; keeping provider offline until lazy recovery succeeds", "provider", name, "error", err)
+				}
+			} else {
+				providerCfg.Models = make(map[string]config.ModelConfig, len(models))
+				for _, model := range models {
+					providerCfg.Models[model.ID] = config.ModelConfig{Modalities: append([]string(nil), model.Modalities...)}
+				}
+				cfg.Providers[name] = providerCfg
 			}
-			providerCfg.Models = make(map[string]config.ModelConfig, len(models))
-			for _, model := range models {
-				providerCfg.Models[model.ID] = config.ModelConfig{Modalities: append([]string(nil), model.Modalities...)}
-			}
-			cfg.Providers[name] = providerCfg
 		}
 		providers[name] = p
 		if logger != nil {

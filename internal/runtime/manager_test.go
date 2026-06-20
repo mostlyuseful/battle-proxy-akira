@@ -87,6 +87,53 @@ func validConfigWithoutOpenAI() *config.Config {
 	return &cfg
 }
 
+func TestManagerBuildSoftFailsOfflineDynamicProviderAndLazyRecovers(t *testing.T) {
+	t.Parallel()
+
+	var online atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("path = %q, want /v1/models", r.URL.Path)
+		}
+		if !online.Load() {
+			http.Error(w, "offline", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-dynamic"}]}`))
+	}))
+	defer upstream.Close()
+
+	m, err := NewManager(func() (*config.Config, error) {
+		return validDynamicConfig(upstream.URL + "/v1"), nil
+	}, upstream.Client())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	models, err := m.Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+	if containsModelID(models, "gpt-dynamic") {
+		t.Fatalf("models should not include offline discovered model, got %v", modelIDs(models))
+	}
+
+	_, err = m.Resolve(context.Background(), ir.Request{Model: "openai_api:gpt-dynamic"})
+	if err == nil {
+		t.Fatal("Resolve should fail while provider is offline")
+	}
+
+	online.Store(true)
+	candidates, err := m.Resolve(context.Background(), ir.Request{Model: "openai_api:gpt-dynamic"})
+	if err != nil {
+		t.Fatalf("Resolve after recovery: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ProviderModel != "gpt-dynamic" {
+		t.Fatalf("candidates = %#v", candidates)
+	}
+}
+
 func TestManagerBuildDiscoversProviderModelsForRouting(t *testing.T) {
 	t.Parallel()
 

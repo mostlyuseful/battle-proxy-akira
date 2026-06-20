@@ -14,6 +14,13 @@ import (
 
 type fakeProvider struct{ name string }
 
+type lazyDiscoveryProvider struct {
+	name   string
+	models []ir.Model
+	err    error
+	calls  int
+}
+
 func (p fakeProvider) Name() string { return p.name }
 func (p fakeProvider) Complete(context.Context, ir.Request) (*ir.Response, error) {
 	return &ir.Response{}, nil
@@ -23,6 +30,22 @@ func (p fakeProvider) Stream(context.Context, ir.Request) (<-chan ir.Event, erro
 }
 func (p fakeProvider) Models(context.Context) ([]ir.Model, error) { return nil, nil }
 func (p fakeProvider) Health(context.Context) error               { return nil }
+
+func (p *lazyDiscoveryProvider) Name() string { return p.name }
+func (p *lazyDiscoveryProvider) Complete(context.Context, ir.Request) (*ir.Response, error) {
+	return &ir.Response{}, nil
+}
+func (p *lazyDiscoveryProvider) Stream(context.Context, ir.Request) (<-chan ir.Event, error) {
+	return nil, nil
+}
+func (p *lazyDiscoveryProvider) Models(context.Context) ([]ir.Model, error) {
+	p.calls++
+	if p.err != nil {
+		return nil, p.err
+	}
+	return p.models, nil
+}
+func (p *lazyDiscoveryProvider) Health(context.Context) error { return nil }
 
 func TestResolveDirectModel(t *testing.T) {
 	t.Parallel()
@@ -186,6 +209,58 @@ func TestResolveMissingModalityMetadataDirectModelStillPassesThrough(t *testing.
 	if _, err := r.Resolve(context.Background(), imageRequest("legacy-model")); err != nil {
 		t.Fatalf("Resolve image request with missing modalities: %v", err)
 	}
+}
+
+func TestResolveProviderQualifiedModelLazyDiscoversOfflineProvider(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.Providers["local"] = config.ProviderConfig{}
+	lazyProvider := &lazyDiscoveryProvider{name: "local", models: []ir.Model{{ID: "some-model-name", Provider: "local", Modalities: []string{ir.ModalityText}}}}
+	r := NewStatic(cfg, map[string]provider.Provider{"local": lazyProvider})
+
+	candidates, err := r.Resolve(context.Background(), ir.Request{Model: "local:some-model-name"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ProviderName != "local" || candidates[0].ProviderModel != "some-model-name" {
+		t.Fatalf("candidates = %#v", candidates)
+	}
+	if lazyProvider.calls != 1 {
+		t.Fatalf("model discovery calls = %d, want 1", lazyProvider.calls)
+	}
+}
+
+func TestResolveDirectModelLazyDiscoversOfflineProvider(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.Providers["local"] = config.ProviderConfig{}
+	lazyProvider := &lazyDiscoveryProvider{name: "local", models: []ir.Model{{ID: "some-model-name", Provider: "local", Modalities: []string{ir.ModalityText}}}}
+	r := NewStatic(cfg, map[string]provider.Provider{"local": lazyProvider})
+
+	candidates, err := r.Resolve(context.Background(), ir.Request{Model: "some-model-name"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ProviderName != "local" {
+		t.Fatalf("candidates = %#v", candidates)
+	}
+	if lazyProvider.calls != 1 {
+		t.Fatalf("model discovery calls = %d, want 1", lazyProvider.calls)
+	}
+}
+
+func TestResolveProviderQualifiedOfflineProviderReturnsNoAvailableModel(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.Providers["local"] = config.ProviderConfig{}
+	lazyProvider := &lazyDiscoveryProvider{name: "local", err: errors.New("offline")}
+	r := NewStatic(cfg, map[string]provider.Provider{"local": lazyProvider})
+
+	_, err := r.Resolve(context.Background(), ir.Request{Model: "local:some-model-name"})
+	assertRouterError(t, err, ErrorNoAvailableModel)
 }
 
 func TestResolveUnknownModel(t *testing.T) {
