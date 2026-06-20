@@ -57,3 +57,10 @@
 - Decision: explicit `provider:model` notation takes precedence; otherwise a configured synthetic alias takes precedence over direct model lookup. `first_available` aliases expand to configured candidate order, skipping candidates whose provider instance is not currently registered; if all configured candidates are skipped, return `no_available_model`. Exposed aliases appear as synthetic `ir.Model` records with provider `proxy`. `RouteCandidate` keeps requested alias plus actual provider/model and provides helpers to rewrite provider requests to the concrete model and responses back to the requested model.
 - Rejected alternatives: returning unavailable candidates for later failures, because the router can only route to registered provider instances today; treating unsupported strategies as `unknown_model`, because the alias exists but is not routable by the current strategy implementation.
 - Affected area: synthetic alias routing, `/v1/models` implementation, logging requested vs resolved model, and future fallback/strategy tasks.
+
+### SSE helper parsing and writing defaults
+
+- Context: `sse.helpers` needed OpenAI-compatible streaming helpers, but exact handling of comments, non-data fields, multiline data fields, and response headers was not specified.
+- Decision: parse only `data:` fields for pass-through events, ignore comments/blank non-events/non-data fields, join multiple `data:` lines in one event with `\n`, preserve `[DONE]` as ordinary event data with an `IsDone` helper, and write multiline payloads as multiple `data:` lines followed by a blank line. Provide a small `SetHeaders` helper for common SSE response headers.
+- Rejected alternatives: exposing provider/OpenAI-specific chunk structs in the SSE package, because this package should remain provider independent; dropping multiline payload support, because it is part of SSE conventions and cheap to support.
+- Affected area: streaming provider implementation and API streaming handlers.
