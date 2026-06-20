@@ -352,6 +352,35 @@ func TestChatCompletionsMetadataLogging(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsLogsImageMetadata(t *testing.T) {
+	logger := &recordingLogger{}
+	handler := NewServer(
+		WithChatRouter(&requestIDRouter{provider: &requestIDProvider{}}),
+		WithRequestLogger(logger),
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-test",
+		"messages":[{"role":"user","content":[
+			{"type":"text","text":"describe"},
+			{"type":"image_url","image_url":{"url":"data:image/png;base64,aW1hZ2UtYnl0ZXM="}}
+		]}]
+	}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d, body %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if len(logger.records) != 1 || len(logger.records[0].ImageInputs) != 1 {
+		t.Fatalf("log records = %#v, want one image metadata entry", logger.records)
+	}
+	image := logger.records[0].ImageInputs[0]
+	if image.MIMEType != "image/png" || image.ByteLength != len("image-bytes") || image.SHA256 == "" {
+		t.Fatalf("image metadata = %#v", image)
+	}
+}
+
 func TestChatCompletionsLoggingFailureDoesNotBreakSuccess(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "upstream-token")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -2,7 +2,10 @@ package logging
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,6 +14,7 @@ import (
 	"time"
 
 	"battle-proxy-akira/internal/config"
+	"battle-proxy-akira/internal/ir"
 )
 
 func TestNewOffLoggerDiscardsRecords(t *testing.T) {
@@ -88,6 +92,63 @@ func TestJSONLLoggerWritesMetadataRecord(t *testing.T) {
 	}
 	if got.Transcript != nil {
 		t.Fatalf("transcript = %#v, want nil", got.Transcript)
+	}
+}
+
+func TestImageMetadataFromRequestHashesDataURLsAndRedactsExternalURLs(t *testing.T) {
+	t.Parallel()
+
+	data := []byte("image-bytes")
+	hash := sha256.Sum256(data)
+	req := ir.Request{Messages: []ir.Message{{Content: []ir.ContentPart{
+		{Type: ir.ContentTypeImageURL, ImageURL: "data:image/png;base64,aW1hZ2UtYnl0ZXM="},
+		{Type: ir.ContentTypeImageURL, ImageURL: "https://example.test/image.png"},
+	}}}}
+
+	got := ImageMetadataFromRequest(req)
+	if len(got) != 2 {
+		t.Fatalf("metadata length = %d, want 2: %#v", len(got), got)
+	}
+	if got[0].Source != ImageSourceDataURL || got[0].MIMEType != "image/png" || got[0].ByteLength != len(data) || got[0].SHA256 != hex.EncodeToString(hash[:]) {
+		t.Fatalf("data URL metadata = %#v", got[0])
+	}
+	if got[1].Source != ImageSourceURL || !got[1].URLRedacted || got[1].SHA256 != "" {
+		t.Fatalf("external URL metadata = %#v", got[1])
+	}
+}
+
+func TestJSONLLoggerWritesImageMetadataWithoutRawDataURL(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "requests.jsonl")
+	logger, err := New(config.LoggingConfig{Enabled: true, Mode: config.LoggingModeMetadataOnly, Path: path})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rawBase64 := "aW1hZ2UtYnl0ZXM="
+	rec := RequestLogRecord{
+		Timestamp:   time.Unix(123, 0).UTC(),
+		RequestID:   "req_image",
+		Status:      200,
+		ImageInputs: ImageMetadataFromRequest(ir.Request{Messages: []ir.Message{{Content: []ir.ContentPart{{Type: ir.ContentTypeImageURL, ImageURL: "data:image/png;base64," + rawBase64}}}}}),
+	}
+	if err := logger.LogRequest(context.Background(), rec); err != nil {
+		t.Fatalf("LogRequest: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if strings.Contains(string(data), rawBase64) || strings.Contains(string(data), "data:image/png") {
+		t.Fatalf("log output leaked raw data URL: %s", data)
+	}
+	var got RequestLogRecord
+	if err := json.Unmarshal(bytes.TrimSpace(data), &got); err != nil {
+		t.Fatalf("unmarshal log: %v", err)
+	}
+	if len(got.ImageInputs) != 1 || got.ImageInputs[0].SHA256 == "" || got.ImageInputs[0].ByteLength != len("image-bytes") || got.ImageInputs[0].MIMEType != "image/png" {
+		t.Fatalf("image metadata = %#v", got.ImageInputs)
 	}
 }
 

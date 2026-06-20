@@ -60,6 +60,7 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 			irReq.Metadata = map[string]string{}
 		}
 		irReq.Metadata["request_id"] = requestID
+		logRec.ImageInputs = requestlog.ImageMetadataFromRequest(irReq)
 
 		candidates, err := chatRouter.Resolve(r.Context(), irReq)
 		if err != nil {

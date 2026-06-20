@@ -19,16 +19,26 @@ type Logger interface {
 
 // RequestLogRecord is the metadata-only JSONL shape for one completed request.
 type RequestLogRecord struct {
-	Timestamp        time.Time `json:"ts"`
-	RequestID        string    `json:"request_id"`
-	RequestedModel   string    `json:"requested_model"`
-	ResolvedProvider string    `json:"resolved_provider"`
-	ResolvedModel    string    `json:"resolved_model"`
-	Stream           bool      `json:"stream"`
-	Status           int       `json:"status"`
-	LatencyMS        int64     `json:"latency_ms"`
-	RetryCount       int       `json:"retry_count"`
-	Transcript       any       `json:"transcript"`
+	Timestamp        time.Time            `json:"ts"`
+	RequestID        string               `json:"request_id"`
+	RequestedModel   string               `json:"requested_model"`
+	ResolvedProvider string               `json:"resolved_provider"`
+	ResolvedModel    string               `json:"resolved_model"`
+	Stream           bool                 `json:"stream"`
+	Status           int                  `json:"status"`
+	LatencyMS        int64                `json:"latency_ms"`
+	RetryCount       int                  `json:"retry_count"`
+	ImageInputs      []ImageInputMetadata `json:"image_inputs,omitempty"`
+	Transcript       any                  `json:"transcript"`
+}
+
+// ImageInputMetadata is safe-to-log metadata for one image input.
+type ImageInputMetadata struct {
+	Source      string `json:"source"`
+	MIMEType    string `json:"mime_type,omitempty"`
+	SHA256      string `json:"sha256,omitempty"`
+	ByteLength  int    `json:"byte_length,omitempty"`
+	URLRedacted bool   `json:"url_redacted,omitempty"`
 }
 
 // New returns a logger for the configured mode. off returns a no-op logger.

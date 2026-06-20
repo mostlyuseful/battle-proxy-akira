@@ -176,3 +176,10 @@
 - Decision: cache only command-source tokens that include valid `expires_at`; refresh when `expires_at <= now + refresh_before_seconds`. Sources or command outputs without expiry are handled conservatively as uncached one-shot tokens, so env/file sources and no-expiry command outputs are re-read/re-run. Command token refresh is guarded by a mutex so concurrent callers share one in-flight refresh and then use the cached token.
 - Rejected alternatives: caching no-expiry tokens forever or for an arbitrary TTL, because without expiry metadata there is no safe refresh window; adding a background refresh goroutine, because on-demand refresh is simpler and enough for MVP.
 - Affected area: access-token command auth, provider auth construction, future refresh/backoff/exhaustion handling.
+
+### Image logging metadata defaults
+
+- Context: `logging.image-hash` needed safe image metadata without raw base64 logging, while full transcript logging controls and configurable redaction policy are later work.
+- Decision: extract image metadata from normalized IR when chat requests are parsed. For `data:*;base64,...` URLs, log only source, MIME type, decoded byte length, and SHA-256 of decoded bytes. For external image URLs, default to recording only that a URL image was present with `url_redacted=true`; no raw URL is stored until a redaction policy is introduced. Malformed data URLs are still treated as data URL inputs but omit hash/length rather than logging raw data.
+- Rejected alternatives: logging external URLs by default, because URLs can contain sensitive query parameters; hashing the raw base64 string, because decoded bytes provide stable identity across base64 formatting variants.
+- Affected area: metadata JSONL records, Chat Completions logging, future full transcript logging and redaction policy configuration.
