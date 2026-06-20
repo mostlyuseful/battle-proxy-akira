@@ -46,10 +46,8 @@ func TestNewHTTPServerAppliesConfiguredTimeouts(t *testing.T) {
 }
 
 func TestLoadRuntimeConfigWithVerbose(t *testing.T) {
-	t.Setenv(configPathEnv, "")
-	t.Setenv(addrOverrideEnv, "")
-
-	cfg, err := loadRuntimeConfigWithVerbose(false, nil)
+	// Default config (empty path).
+	cfg, err := loadRuntimeConfigWithVerbose(runtimeFlags{}, false, nil)
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
@@ -57,17 +55,26 @@ func TestLoadRuntimeConfigWithVerbose(t *testing.T) {
 		t.Fatalf("Addr = %q, want default %q", cfg.Server.Addr, config.DefaultAddr)
 	}
 
+	// Config from file.
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{"server":{"addr":"127.0.0.1:9090"}}`), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	t.Setenv(configPathEnv, path)
-	cfg, err = loadRuntimeConfigWithVerbose(true, nil)
+	cfg, err = loadRuntimeConfigWithVerbose(runtimeFlags{configPath: path}, true, nil)
 	if err != nil {
 		t.Fatalf("load config file: %v", err)
 	}
 	if cfg.Server.Addr != "127.0.0.1:9090" {
 		t.Fatalf("Addr = %q, want configured addr", cfg.Server.Addr)
+	}
+
+	// Flag addr overrides config.
+	cfg, err = loadRuntimeConfigWithVerbose(runtimeFlags{configPath: path, addr: "0.0.0.0:3000"}, true, nil)
+	if err != nil {
+		t.Fatalf("load config with addr flag: %v", err)
+	}
+	if cfg.Server.Addr != "0.0.0.0:3000" {
+		t.Fatalf("Addr = %q, want overridden addr", cfg.Server.Addr)
 	}
 }
 

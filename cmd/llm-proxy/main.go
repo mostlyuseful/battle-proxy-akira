@@ -19,15 +19,21 @@ import (
 )
 
 const (
-	configPathEnv          = "LLM_PROXY_CONFIG"
-	addrOverrideEnv        = "LLM_PROXY_ADDR"
 	defaultShutdownTimeout = 10 * time.Second
 )
+
+// runtimeFlags bundles command-line flags for building a runtime config.
+type runtimeFlags struct {
+	configPath string
+	addr       string
+}
 
 func main() {
 	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	verbose := flags.Bool("verbose", false, "log informational and debug messages")
 	help := flags.Bool("help", false, "show usage information")
+	cfgPath := flags.String("config", "", "path to JSON config file")
+	addr := flags.String("addr", "", "server listen address (overrides config)")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		slog.Error("parse flags", "error", err)
 		os.Exit(1)
@@ -38,13 +44,17 @@ func main() {
 		os.Exit(0)
 	}
 
-	cfg, err := loadRuntimeConfigWithVerbose(*verbose, slog.Default())
+	rf := runtimeFlags{configPath: *cfgPath, addr: *addr}
+
+	cfg, err := loadRuntimeConfigWithVerbose(rf, *verbose, slog.Default())
 	if err != nil {
 		slog.Error("load config", "error", err)
 		os.Exit(1)
 	}
 
-	manager, err := runtime.NewManager(loadRuntimeConfig, nil)
+	manager, err := runtime.NewManager(func() (*config.Config, error) {
+		return loadRuntimeConfig(rf)
+	}, nil)
 	if err != nil {
 		slog.Error("build runtime", "error", err)
 		os.Exit(1)
@@ -123,28 +133,26 @@ func runReloadLoop(signals <-chan os.Signal, reload func() error) {
 	}
 }
 
-func loadRuntimeConfig() (*config.Config, error) {
-	return loadRuntimeConfigWithVerbose(false, nil)
+func loadRuntimeConfig(rf runtimeFlags) (*config.Config, error) {
+	return loadRuntimeConfigWithVerbose(rf, false, nil)
 }
 
-func loadRuntimeConfigWithVerbose(verbose bool, logger *slog.Logger) (*config.Config, error) {
-	path := os.Getenv(configPathEnv)
-	cfg, err := config.Load(path)
+func loadRuntimeConfigWithVerbose(rf runtimeFlags, verbose bool, logger *slog.Logger) (*config.Config, error) {
+	cfg, err := config.Load(rf.configPath)
 	if err != nil {
 		return nil, err
 	}
 	if verbose && logger != nil {
-		if path == "" {
+		if rf.configPath == "" {
 			logger.Info("using default configuration", "config_path", "")
 		} else {
-			logger.Info("loaded configuration file", "config_path", path)
+			logger.Info("loaded configuration file", "config_path", rf.configPath)
 		}
 	}
-	// Preserve the early development env override while allowing JSON config to be the default source of truth.
-	if addr := os.Getenv(addrOverrideEnv); addr != "" {
-		cfg.Server.Addr = addr
+	if rf.addr != "" {
+		cfg.Server.Addr = rf.addr
 		if verbose && logger != nil {
-			logger.Info("overrode config server address from environment", "addr", addr)
+			logger.Info("overrode config server address from flag", "addr", rf.addr)
 		}
 	}
 	return cfg, nil
