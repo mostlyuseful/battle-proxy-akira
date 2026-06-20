@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -237,6 +239,45 @@ func TestChatCompletionsErrors(t *testing.T) {
 				t.Fatalf("error code = %q, want %q", body.Error.Code, tt.wantCode)
 			}
 		})
+	}
+}
+
+func TestChatCompletionsFailureLogDoesNotContainBearerOrAPIKey(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-upstream-secret-token")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "sk-upstream-secret-token client-secret-token", http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+
+	logPath := filepath.Join(t.TempDir(), "requests.jsonl")
+	logger, err := requestlog.New(config.LoggingConfig{Enabled: true, Mode: config.LoggingModeMetadataOnly, Path: logPath})
+	if err != nil {
+		t.Fatalf("New logger: %v", err)
+	}
+	handler := NewServer(
+		WithChatRouter(newTestChatRouter(t, upstream.URL)),
+		WithClientAuth(StaticBearerAuth([]string{"client-secret-token"})),
+		WithRequestLogger(logger),
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Authorization", "Bearer client-secret-token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	combined := rec.Body.String()
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	combined += string(logData)
+	for _, secret := range []string{"sk-upstream-secret-token", "client-secret-token"} {
+		if strings.Contains(combined, secret) {
+			t.Fatalf("response/log leaked %q in %s", secret, combined)
+		}
 	}
 }
 

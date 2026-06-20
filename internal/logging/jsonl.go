@@ -76,6 +76,7 @@ func (l *JSONLLogger) LogRequest(ctx context.Context, rec RequestLogRecord) erro
 	if rec.Timestamp.IsZero() {
 		rec.Timestamp = time.Now().UTC()
 	}
+	rec = RedactRecord(rec)
 
 	encoded, err := json.Marshal(rec)
 	if err != nil {

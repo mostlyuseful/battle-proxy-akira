@@ -106,3 +106,10 @@
 - Decision: add an `internal/logging` package with `off` no-op and `metadata_only` JSONL append modes, plus a small API `WithRequestLogger` hook. Chat handlers log metadata for completed handler paths and ignore logger errors so successful model responses are not failed by observability issues. The log request ID uses `X-Request-ID` when present and otherwise generates a temporary `req_<hex>` value until the request-ID task centralizes propagation.
 - Rejected alternatives: failing successful requests when JSONL writes fail, because the task explicitly asks logging failures not to crash successful requests; waiting for `api.request-ids`, because request logging can use a local fallback and later be unified.
 - Affected area: chat completion handlers, logging package, future request ID propagation, and later redaction/logging hardening tasks.
+
+### Baseline redaction scope
+
+- Context: `logging.redaction-baseline` needed no-secret guarantees and future redaction helpers, but full transcript/image redaction is out of scope and metadata logs should not include headers or request bodies.
+- Decision: keep metadata records header/body-free and add baseline string/record redaction for common bearer-token and `sk-...` API-key patterns before JSONL serialization. API/provider error paths continue returning generic upstream messages/status codes without upstream bodies. Tests search combined response/log output for sentinel client bearer tokens and upstream API keys on representative failure paths.
+- Rejected alternatives: deep transcript redaction now, because transcript logging is not implemented and has dedicated future work; trying to redact every possible secret format, because baseline helpers should cover current bearer/API-key risks without overfitting.
+- Affected area: metadata JSONL logging, provider/API error handling, future structured logging and redaction hardening.

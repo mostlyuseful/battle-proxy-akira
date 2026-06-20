@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +22,18 @@ func TestNewOffLoggerDiscardsRecords(t *testing.T) {
 	}
 	if err := logger.LogRequest(context.Background(), RequestLogRecord{RequestedModel: "coding"}); err != nil {
 		t.Fatalf("LogRequest: %v", err)
+	}
+}
+
+func TestRedactStringRemovesBearerAndAPIKeyPatterns(t *testing.T) {
+	t.Parallel()
+
+	input := "Authorization: Bearer client-secret-token uses sk-upstream-secret-token"
+	got := RedactString(input)
+	for _, secret := range []string{"client-secret-token", "sk-upstream-secret-token"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("redacted string %q still contains secret %q", got, secret)
+		}
 	}
 }
 
@@ -75,5 +88,34 @@ func TestJSONLLoggerWritesMetadataRecord(t *testing.T) {
 	}
 	if got.Transcript != nil {
 		t.Fatalf("transcript = %#v, want nil", got.Transcript)
+	}
+}
+
+func TestJSONLLoggerRedactsSecretLikeMetadata(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "requests.jsonl")
+	logger, err := New(config.LoggingConfig{Enabled: true, Mode: config.LoggingModeMetadataOnly, Path: path})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := logger.LogRequest(context.Background(), RequestLogRecord{
+		Timestamp:      time.Unix(123, 0).UTC(),
+		RequestID:      "Bearer client-secret-token",
+		RequestedModel: "sk-upstream-secret-token",
+		Status:         502,
+	}); err != nil {
+		t.Fatalf("LogRequest: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	for _, secret := range []string{"client-secret-token", "sk-upstream-secret-token"} {
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("log output leaked %q in %s", secret, data)
+		}
 	}
 }
