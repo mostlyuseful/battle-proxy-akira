@@ -14,7 +14,7 @@ import (
 )
 
 // RegisterChatRoutes wires Chat Completions endpoints.
-func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth Middleware, logger requestlog.Logger) {
+func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth Middleware, logger requestlog.Logger, maxBodyBytes int64) {
 	if clientAuth == nil {
 		clientAuth = identityMiddleware
 	}
@@ -36,9 +36,9 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 			return
 		}
 
-		body, err := io.ReadAll(r.Body)
+		body, err := readLimitedBody(w, r, maxBodyBytes)
 		if err != nil {
-			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorInvalidRequest, "read request body failed", ""))
+			writeLoggedOpenAIError(w, r, logger, logRec, started, proxyErrorFromReadBodyError(err))
 			return
 		}
 		chatReq, err := openaiapi.ParseChatCompletionRequest(body)
@@ -91,6 +91,26 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 		logRec.LatencyMS = time.Since(started).Milliseconds()
 		_ = logger.LogRequest(r.Context(), logRec)
 	})))
+}
+
+func readLimitedBody(w http.ResponseWriter, r *http.Request, maxBodyBytes int64) ([]byte, error) {
+	if maxBodyBytes > 0 && r.ContentLength > maxBodyBytes {
+		return nil, &http.MaxBytesError{Limit: maxBodyBytes}
+	}
+	reader := r.Body
+	if maxBodyBytes > 0 {
+		reader = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}
+
+func proxyErrorFromReadBodyError(err error) *ProxyError {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return NewProxyError(ErrorInputTooLarge, "request body exceeds maximum size", "")
+	}
+	return NewProxyError(ErrorInvalidRequest, "read request body failed", "")
 }
 
 func streamChatCompletion(w http.ResponseWriter, r *http.Request, chatRouter router.Router, candidate router.RouteCandidate, irReq ir.Request, logger requestlog.Logger, logRec requestlog.RequestLogRecord, started time.Time) {

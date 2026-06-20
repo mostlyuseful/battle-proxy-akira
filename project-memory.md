@@ -127,3 +127,10 @@
 - Decision: accept simple string content as before and accept content arrays containing only `text` and `image_url` parts. Require the OpenAI-shaped nested `image_url.url` string while otherwise accepting both ordinary URLs and data URLs without fetch/URL validation; preserve optional `detail` into IR. When converting IR back to OpenAI Chat requests, keep all-text messages as a string and emit multimodal arrays only when image parts are present.
 - Rejected alternatives: validating URL schemes/base64 payloads now, because the task only needs request-shape validation; accepting `input_image` in Chat Completions, because that belongs to Responses/future adapters.
 - Affected area: OpenAI edge parsing, IR normalization, OpenAI-compatible provider request serialization, future modality filtering and image redaction tasks.
+
+### Request body size limit behavior
+
+- Context: `api.body-size-limits` needed `server.max_body_bytes` enforcement for large image/data-URL payloads, but server config is currently exposed to the API layer via construction options rather than full runtime config wiring.
+- Decision: default API servers to `config.DefaultMaxBodyBytes` and add `WithServerConfig` so `ServerConfig.MaxBodyBytes` controls chat request body limits. Chat handlers reject requests with oversized `Content-Length` before reading, otherwise wrap the body with `http.MaxBytesReader`, and return OpenAI-style `input_too_large` errors with HTTP 413 while logging the 413 metadata record.
+- Rejected alternatives: returning generic 400 for oversized bodies, because 413 is specifically actionable for clients; disabling limits when no explicit option is passed, because the config default exists to protect fresh deployments.
+- Affected area: API server options, Chat Completions body reading, OpenAI-style error mapping, and future endpoint request handling.

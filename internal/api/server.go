@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"battle-proxy-akira/internal/config"
 	requestlog "battle-proxy-akira/internal/logging"
 	"battle-proxy-akira/internal/router"
 )
@@ -19,6 +20,7 @@ type serverOptions struct {
 	chatRouter    router.Router
 	clientAuth    Middleware
 	requestLogger requestlog.Logger
+	maxBodyBytes  int64
 }
 
 // WithModelLister configures the source used by GET /v1/models.
@@ -49,12 +51,20 @@ func WithRequestLogger(logger requestlog.Logger) Option {
 	}
 }
 
+// WithServerConfig configures API behavior controlled by server config.
+func WithServerConfig(cfg config.ServerConfig) Option {
+	return func(opts *serverOptions) {
+		opts.maxBodyBytes = cfg.MaxBodyBytes
+	}
+}
+
 // NewServer builds the HTTP handler tree for the proxy API.
 func NewServer(options ...Option) http.Handler {
 	opts := serverOptions{
 		modelLister:   ModelListerFunc(emptyModels),
 		clientAuth:    identityMiddleware,
 		requestLogger: requestlog.NoopLogger{},
+		maxBodyBytes:  config.DefaultMaxBodyBytes,
 	}
 	for _, option := range options {
 		option(&opts)
@@ -68,11 +78,14 @@ func NewServer(options ...Option) http.Handler {
 	if opts.requestLogger == nil {
 		opts.requestLogger = requestlog.NoopLogger{}
 	}
+	if opts.maxBodyBytes <= 0 {
+		opts.maxBodyBytes = config.DefaultMaxBodyBytes
+	}
 
 	mux := http.NewServeMux()
 	RegisterHealthRoutes(mux)
 	RegisterModelRoutes(mux, opts.modelLister, opts.clientAuth)
-	RegisterChatRoutes(mux, opts.chatRouter, opts.clientAuth, opts.requestLogger)
+	RegisterChatRoutes(mux, opts.chatRouter, opts.clientAuth, opts.requestLogger, opts.maxBodyBytes)
 	return requestIDMiddleware(mux)
 }
 

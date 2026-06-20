@@ -8,6 +8,7 @@ type ErrorCode string
 const (
 	ErrorInvalidRequest      ErrorCode = "invalid_request"
 	ErrorUnsupportedModality ErrorCode = "unsupported_modality"
+	ErrorInputTooLarge       ErrorCode = "input_too_large"
 	ErrorUnknownModel        ErrorCode = "unknown_model"
 	ErrorNoAvailableModel    ErrorCode = "no_available_model"
 	ErrorProviderAuthFailed  ErrorCode = "provider_auth_failed"
@@ -64,6 +65,8 @@ func StatusForErrorCode(code ErrorCode) int {
 		return http.StatusForbidden
 	case ErrorUnsupportedModality:
 		return http.StatusUnprocessableEntity
+	case ErrorInputTooLarge:
+		return http.StatusRequestEntityTooLarge
 	default:
 		return http.StatusInternalServerError
 	}
