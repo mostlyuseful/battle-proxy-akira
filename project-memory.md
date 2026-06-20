@@ -43,3 +43,10 @@
 - Decision: define the full provider-neutral interface now (`Name`, `Complete`, `Stream`, `Models`, `Health`) but implement only non-streaming `Complete` for OpenAI-compatible providers; `Stream` returns `ErrStreamingUnsupported`, `Models` returns configured model metadata, and `Health` only checks context for now. `Complete` builds a fresh Chat Completions body from IR, forces `stream=false`, appends `/chat/completions` to the configured `base_url`, forwards preserved unknown top-level fields, and does not include upstream error bodies in returned status errors.
 - Rejected alternatives: reusing the raw incoming request body as-is, because synthetic model resolution and stream forcing need controlled mutation; fetching live upstream `/models` in this task, because static config is enough for the first non-streaming provider and live discovery is out of scope.
 - Affected area: provider adapter contract, router integration, future streaming provider work, and upstream error handling.
+
+### Static direct model routing defaults
+
+- Context: `router.static-model` needed deterministic direct model resolution and error behavior, but duplicate model names across providers and missing provider instances were not specified.
+- Decision: support both direct model names and explicit `provider:model` notation. Direct model names are resolved by lexicographically sorted provider name for deterministic behavior when multiple providers configure the same model. A model absent from config returns `unknown_model`; a configured model whose provider instance is unavailable returns `no_available_model`. Static router `MarkSuccess`/`MarkFailure` are no-ops until fallback/circuit-breaker tasks.
+- Rejected alternatives: treating duplicate direct model names as ambiguous errors, because a deterministic first-provider rule keeps the MVP simple; returning `unknown_model` when the provider instance is missing, because the model is configured but temporarily unroutable.
+- Affected area: router integration, future synthetic alias expansion, API error mapping, and logging of requested vs provider model.
