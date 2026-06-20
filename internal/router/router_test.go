@@ -3,7 +3,9 @@ package router
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"battle-proxy-akira/internal/config"
 	"battle-proxy-akira/internal/ir"
@@ -320,6 +322,83 @@ func TestRouteCandidateProviderRequestAndResponseRewrite(t *testing.T) {
 	rewritten := candidate.RewriteResponse(ir.Response{Model: "gpt-5.1-codex-max"})
 	if rewritten.Model != "coding" {
 		t.Fatalf("rewritten response model = %q, want coding", rewritten.Model)
+	}
+}
+
+func TestAvailabilityStateMarksFailureAndSuccess(t *testing.T) {
+	t.Parallel()
+
+	r := NewStatic(testConfig(), map[string]provider.Provider{"openai_api": fakeProvider{name: "openai_api"}})
+	candidate := RouteCandidate{ProviderName: "openai_api", ProviderModel: "gpt-5.2", RequestedModel: "gpt-5.2"}
+	r.MarkFailure(candidate, &provider.Error{Code: provider.ErrorProviderRateLimited, Retryable: true, Provider: "openai_api"})
+
+	state, ok := r.Availability("openai_api", "gpt-5.2")
+	if !ok {
+		t.Fatal("missing availability state after failure")
+	}
+	if state.Healthy || state.Failures != 1 || state.LastErrorCode != provider.ErrorProviderRateLimited || state.ExhaustedUntil == nil {
+		t.Fatalf("failure state = %#v", state)
+	}
+	if r.IsCandidateAvailable(candidate, time.Now()) {
+		t.Fatal("candidate should be unavailable during exhaustion window")
+	}
+	if !r.IsCandidateAvailable(candidate, state.ExhaustedUntil.Add(time.Nanosecond)) {
+		t.Fatal("candidate should be available after exhaustion window")
+	}
+
+	r.MarkSuccess(candidate)
+	state, ok = r.Availability("openai_api", "gpt-5.2")
+	if !ok {
+		t.Fatal("missing availability state after success")
+	}
+	if !state.Healthy || state.Failures != 0 || state.LastErrorCode != "" || state.ExhaustedUntil != nil {
+		t.Fatalf("success state = %#v", state)
+	}
+}
+
+func TestAvailabilityStateRecordsGenericFailureWithoutExhaustionWindow(t *testing.T) {
+	t.Parallel()
+
+	r := NewStatic(testConfig(), nil)
+	candidate := RouteCandidate{ProviderName: "codex_sub", ProviderModel: "gpt-5.1-codex-max", RequestedModel: "coding"}
+	r.MarkFailure(candidate, errors.New("boom"))
+
+	state, ok := r.Availability("codex_sub", "gpt-5.1-codex-max")
+	if !ok {
+		t.Fatal("missing availability state")
+	}
+	if state.Healthy || state.Failures != 1 || state.LastErrorCode != provider.ErrorUpstream || state.ExhaustedUntil != nil {
+		t.Fatalf("state = %#v", state)
+	}
+	if !r.IsCandidateAvailable(candidate, time.Now()) {
+		t.Fatal("generic failure without exhaustion window should not be unavailable")
+	}
+}
+
+func TestAvailabilityStateConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
+	r := NewStatic(testConfig(), nil)
+	candidate := RouteCandidate{ProviderName: "openai_api", ProviderModel: "gpt-5.2", RequestedModel: "gpt-5.2"}
+	const workers = 32
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			if i%2 == 0 {
+				r.MarkFailure(candidate, &provider.Error{Code: provider.ErrorUpstream, Retryable: true, Provider: "openai_api"})
+			} else {
+				r.MarkSuccess(candidate)
+			}
+			_, _ = r.Availability("openai_api", "gpt-5.2")
+			_ = r.AvailabilityStates()
+			_ = r.IsCandidateAvailable(candidate, time.Now())
+		}(i)
+	}
+	wg.Wait()
+	if states := r.AvailabilityStates(); len(states) != 1 {
+		t.Fatalf("states length = %d, want 1: %#v", len(states), states)
 	}
 }
 

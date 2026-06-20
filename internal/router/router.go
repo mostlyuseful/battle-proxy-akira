@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"battle-proxy-akira/internal/config"
 	"battle-proxy-akira/internal/ir"
@@ -65,8 +66,9 @@ type Router interface {
 
 // StaticRouter resolves configured direct models and first_available synthetic aliases.
 type StaticRouter struct {
-	cfg       config.Config
-	providers map[string]provider.Provider
+	cfg          config.Config
+	providers    map[string]provider.Provider
+	availability *AvailabilityTracker
 }
 
 // NewStatic creates a deterministic router for configured direct and synthetic models.
@@ -74,7 +76,7 @@ func NewStatic(cfg config.Config, providers map[string]provider.Provider) *Stati
 	if providers == nil {
 		providers = map[string]provider.Provider{}
 	}
-	return &StaticRouter{cfg: cfg, providers: providers}
+	return &StaticRouter{cfg: cfg, providers: providers, availability: NewAvailabilityTracker()}
 }
 
 // Resolve returns route candidates for req.Model.
@@ -150,11 +152,43 @@ func (r *StaticRouter) Models(ctx context.Context) ([]ir.Model, error) {
 	return models, nil
 }
 
-// MarkFailure is a no-op for the static router. Later routers add fallback and circuit state.
-func (r *StaticRouter) MarkFailure(candidate RouteCandidate, err error) {}
+// MarkFailure records provider/model availability state for the route candidate.
+func (r *StaticRouter) MarkFailure(candidate RouteCandidate, err error) {
+	if r.availability != nil {
+		r.availability.MarkFailure(candidate, err)
+	}
+}
 
-// MarkSuccess is a no-op for the static router. Later routers add fallback and circuit state.
-func (r *StaticRouter) MarkSuccess(candidate RouteCandidate) {}
+// MarkSuccess records provider/model availability state for the route candidate.
+func (r *StaticRouter) MarkSuccess(candidate RouteCandidate) {
+	if r.availability != nil {
+		r.availability.MarkSuccess(candidate)
+	}
+}
+
+// Availability returns a snapshot of one provider/model availability state.
+func (r *StaticRouter) Availability(providerName, modelName string) (AvailabilityState, bool) {
+	if r.availability == nil {
+		return AvailabilityState{}, false
+	}
+	return r.availability.Get(providerName, modelName)
+}
+
+// AvailabilityStates returns snapshots for all tracked provider/model states.
+func (r *StaticRouter) AvailabilityStates() []AvailabilityState {
+	if r.availability == nil {
+		return nil
+	}
+	return r.availability.States()
+}
+
+// IsCandidateAvailable reports whether a candidate is not in an active unavailable window.
+func (r *StaticRouter) IsCandidateAvailable(candidate RouteCandidate, at time.Time) bool {
+	if r.availability == nil {
+		return true
+	}
+	return r.availability.IsAvailable(candidate.ProviderName, candidate.ProviderModel, at)
+}
 
 func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.SyntheticModelConfig, requiredModalities []string) ([]RouteCandidate, error) {
 	if synthetic.Strategy != config.SyntheticStrategyFirstAvailable {

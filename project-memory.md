@@ -183,3 +183,10 @@
 - Decision: extract image metadata from normalized IR when chat requests are parsed. For `data:*;base64,...` URLs, log only source, MIME type, decoded byte length, and SHA-256 of decoded bytes. For external image URLs, default to recording only that a URL image was present with `url_redacted=true`; no raw URL is stored until a redaction policy is introduced. Malformed data URLs are still treated as data URL inputs but omit hash/length rather than logging raw data.
 - Rejected alternatives: logging external URLs by default, because URLs can contain sensitive query parameters; hashing the raw base64 string, because decoded bytes provide stable identity across base64 formatting variants.
 - Affected area: metadata JSONL records, Chat Completions logging, future full transcript logging and redaction policy configuration.
+
+### Availability state defaults
+
+- Context: `router.availability-state` needed in-memory provider/model state, but backoff policy and admin state exposure are later work.
+- Decision: add a mutex-protected `AvailabilityTracker` owned by `StaticRouter`. `MarkFailure` records provider/model, `Healthy=false`, increments failures, stores a classified provider error code (or `upstream_error` fallback), and applies a short in-memory exhaustion window for `provider_rate_limited`/`provider_exhausted`. `MarkSuccess` resets the pair to healthy and clears failures/error/exhaustion. Current routing does not skip candidates yet; `IsCandidateAvailable`, `Availability`, and `AvailabilityStates` expose snapshots for later routing/circuit-breaker tasks.
+- Rejected alternatives: skipping candidates immediately on any failure, because no health probe/backoff policy exists yet and that could strand models indefinitely; persisting state, because MVP hardening only requires process-local state.
+- Affected area: static router outcome recording, future circuit breaking/exhaustion buffering, and admin state reporting.
