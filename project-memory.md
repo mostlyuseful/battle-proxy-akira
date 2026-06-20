@@ -64,3 +64,10 @@
 - Decision: parse only `data:` fields for pass-through events, ignore comments/blank non-events/non-data fields, join multiple `data:` lines in one event with `\n`, preserve `[DONE]` as ordinary event data with an `IsDone` helper, and write multiline payloads as multiple `data:` lines followed by a blank line. Provide a small `SetHeaders` helper for common SSE response headers.
 - Rejected alternatives: exposing provider/OpenAI-specific chunk structs in the SSE package, because this package should remain provider independent; dropping multiline payload support, because it is part of SSE conventions and cheap to support.
 - Affected area: streaming provider implementation and API streaming handlers.
+
+### OpenAI-compatible streaming provider event shape
+
+- Context: `provider.openai-stream` needed to expose upstream SSE through the provider `Stream` method, but mid-stream error representation and chunk JSON translation are later concerns.
+- Decision: `Stream` sends the same Chat Completions request path as `Complete` with `stream=true` and `Accept: text/event-stream`, validates non-2xx responses before returning the channel, then reads SSE incrementally in a goroutine. Each upstream `data:` payload becomes an `ir.Event` with `Type=message_delta`, `Text` set to the raw payload, and `Raw` set to the raw JSON bytes; `[DONE]` becomes `Type=done`. Context cancellation uses `http.NewRequestWithContext` and closes the stream goroutine without emitting a synthetic error event.
+- Rejected alternatives: decoding OpenAI stream chunk JSON into structured deltas now, because the API layer can still pass through raw payloads and provider-specific event translation is out of scope; returning upstream error bodies on pre-stream status errors, because they may contain sensitive provider details.
+- Affected area: streaming provider, API streaming handler, retry-before-first-token logic, and future stream translation/error handling.

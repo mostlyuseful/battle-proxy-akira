@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"battle-proxy-akira/internal/config"
 	"battle-proxy-akira/internal/ir"
@@ -152,6 +153,146 @@ func TestOpenAICompatibleProviderCompleteReturnsUpstreamStatusErrorWithoutBody(t
 	}
 	if strings.Contains(err.Error(), "secret-token-in-body") || strings.Contains(err.Error(), "test-token") {
 		t.Fatalf("error leaked secret data: %q", err.Error())
+	}
+}
+
+func TestOpenAICompatibleProviderStreamReadsSSEIncrementally(t *testing.T) {
+	t.Parallel()
+
+	var captured struct {
+		Path          string
+		Authorization string
+		Accept        string
+		Body          map[string]any
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.Path = r.URL.Path
+		captured.Authorization = r.Header.Get("Authorization")
+		captured.Accept = r.Header.Get("Accept")
+		if err := json.NewDecoder(r.Body).Decode(&captured.Body); err != nil {
+			t.Errorf("decode upstream request body: %v", err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"delta\":\"hello\"}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: {\"delta\":\" world\"}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	provider, err := NewOpenAICompatible("openai_api", config.ProviderConfig{BaseURL: upstream.URL + "/v1"}, staticTokenSource("test-token"), upstream.Client())
+	if err != nil {
+		t.Fatalf("NewOpenAICompatible: %v", err)
+	}
+
+	events, err := provider.Stream(context.Background(), ir.Request{
+		Model:    "gpt-test",
+		Messages: []ir.Message{{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "hello"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	var got []ir.Event
+	for event := range events {
+		got = append(got, event)
+	}
+	if len(got) != 3 {
+		t.Fatalf("events length = %d, want 3", len(got))
+	}
+	if got[0].Type != ir.EventTypeMessageDelta || got[0].Text != `{"delta":"hello"}` {
+		t.Fatalf("event 0 = %#v", got[0])
+	}
+	if got[1].Type != ir.EventTypeMessageDelta || got[1].Text != `{"delta":" world"}` {
+		t.Fatalf("event 1 = %#v", got[1])
+	}
+	if got[2].Type != ir.EventTypeDone || got[2].Text != "[DONE]" {
+		t.Fatalf("event 2 = %#v, want done", got[2])
+	}
+	if captured.Path != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want /v1/chat/completions", captured.Path)
+	}
+	if captured.Authorization != "Bearer test-token" {
+		t.Fatalf("authorization = %q, want bearer token", captured.Authorization)
+	}
+	if captured.Accept != "text/event-stream" {
+		t.Fatalf("accept = %q, want text/event-stream", captured.Accept)
+	}
+	if captured.Body["stream"] != true {
+		t.Fatalf("body stream = %#v, want true", captured.Body["stream"])
+	}
+}
+
+func TestOpenAICompatibleProviderStreamReturnsPreStreamStatusErrorWithoutBody(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "secret-token-in-body", http.StatusTooManyRequests)
+	}))
+	defer upstream.Close()
+
+	provider, err := NewOpenAICompatible("openai_api", config.ProviderConfig{BaseURL: upstream.URL}, staticTokenSource("test-token"), upstream.Client())
+	if err != nil {
+		t.Fatalf("NewOpenAICompatible: %v", err)
+	}
+
+	_, err = provider.Stream(context.Background(), ir.Request{
+		Model:    "gpt-test",
+		Messages: []ir.Message{{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "hello"}}}},
+	})
+	if err == nil {
+		t.Fatal("Stream returned nil error, want upstream status error")
+	}
+	if !strings.Contains(err.Error(), "status 429") {
+		t.Fatalf("error = %q, want status 429", err.Error())
+	}
+	if strings.Contains(err.Error(), "secret-token-in-body") || strings.Contains(err.Error(), "test-token") {
+		t.Fatalf("error leaked secret data: %q", err.Error())
+	}
+}
+
+func TestOpenAICompatibleProviderStreamPropagatesContextCancellation(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"delta\":\"hello\"}\n\n"))
+		flusher.Flush()
+		<-r.Context().Done()
+		close(canceled)
+	}))
+	defer upstream.Close()
+
+	provider, err := NewOpenAICompatible("openai_api", config.ProviderConfig{BaseURL: upstream.URL}, staticTokenSource("test-token"), upstream.Client())
+	if err != nil {
+		t.Fatalf("NewOpenAICompatible: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	events, err := provider.Stream(ctx, ir.Request{
+		Model:    "gpt-test",
+		Messages: []ir.Message{{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "hello"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	<-started
+	if event := <-events; event.Text != `{"delta":"hello"}` {
+		t.Fatalf("first event = %#v", event)
+	}
+	cancel()
+
+	select {
+	case <-canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream request context was not canceled")
 	}
 }
 
