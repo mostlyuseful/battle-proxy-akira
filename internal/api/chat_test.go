@@ -242,10 +242,13 @@ func TestChatCompletionsErrors(t *testing.T) {
 	}
 }
 
-func TestChatCompletionsImageRequestUnsupportedModality(t *testing.T) {
+func TestChatCompletionsImageRequestDirectRoutePassesThroughToUpstream(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "upstream-token")
+	called := false
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("upstream should not be called for unsupported modality")
+		called = true
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"error":{"code":"unsupported_modality","message":"no vision"}}`))
 	}))
 	defer upstream.Close()
 
@@ -261,6 +264,9 @@ func TestChatCompletionsImageRequestUnsupportedModality(t *testing.T) {
 	}`))
 	handler.ServeHTTP(rec, req)
 
+	if !called {
+		t.Fatal("upstream was not called")
+	}
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status code = %d, want %d, body %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
 	}

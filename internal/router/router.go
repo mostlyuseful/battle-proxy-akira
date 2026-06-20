@@ -324,18 +324,11 @@ func (r *StaticRouter) resolveProviderModel(providerName, providerModel, request
 		}
 		return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("unknown provider %q for model %q", providerName, requestedModel), Param: "model"}
 	}
-	modelCfg, ok := providerCfg.Models[providerModel]
-	if !ok {
+	if _, ok := providerCfg.Models[providerModel]; !ok {
 		if r.logger != nil {
 			r.logger.Warn("provider-qualified model rejected", "requested_model", requestedModel, "provider", providerName, "model", providerModel, "reason", "unknown_model")
 		}
 		return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("unknown model %q for provider %q", providerModel, providerName), Param: "model"}
-	}
-	if !supportsModalities(modelCfg.Modalities, requiredModalities) {
-		if r.logger != nil {
-			r.logger.Warn("provider-qualified model rejected", "requested_model", requestedModel, "provider", providerName, "model", providerModel, "reason", "unsupported_modality", "required_modalities", requiredModalities, "model_modalities", modelCfg.Modalities)
-		}
-		return nil, &Error{Code: ErrorUnsupportedModality, Message: fmt.Sprintf("model %q for provider %q does not support requested modalities", providerModel, providerName), Param: "model"}
 	}
 	if r.availability != nil && !r.availability.IsAvailable(providerName, providerModel, time.Now()) {
 		if r.logger != nil {
@@ -349,22 +342,13 @@ func (r *StaticRouter) resolveProviderModel(providerName, providerModel, request
 func (r *StaticRouter) resolveDirectModel(model string, requiredModalities []string) ([]RouteCandidate, error) {
 	providerNames := sortedProviderNames(r.cfg.Providers)
 	foundModel := false
-	unsupportedModalities := 0
 	unavailableCandidates := 0
 	for _, providerName := range providerNames {
 		providerCfg := r.cfg.Providers[providerName]
-		modelCfg, ok := providerCfg.Models[model]
-		if !ok {
+		if _, ok := providerCfg.Models[model]; !ok {
 			continue
 		}
 		foundModel = true
-		if !supportsModalities(modelCfg.Modalities, requiredModalities) {
-			unsupportedModalities++
-			if r.logger != nil {
-				r.logger.Info("direct model candidate skipped", "model", model, "provider", providerName, "reason", "unsupported_modality", "required_modalities", requiredModalities, "model_modalities", modelCfg.Modalities)
-			}
-			continue
-		}
 		if r.availability != nil && !r.availability.IsAvailable(providerName, model, time.Now()) {
 			unavailableCandidates++
 			if r.logger != nil {
@@ -373,15 +357,9 @@ func (r *StaticRouter) resolveDirectModel(model string, requiredModalities []str
 			continue
 		}
 		if r.logger != nil {
-			r.logger.Info("direct model resolved", "model", model, "provider", providerName)
+			r.logger.Info("direct model resolved", "model", model, "provider", providerName, "required_modalities", requiredModalities)
 		}
 		return r.candidate(providerName, model, model)
-	}
-	if foundModel && unsupportedModalities > 0 {
-		if r.logger != nil {
-			r.logger.Warn("direct model rejected", "model", model, "reason", "unsupported_modality", "unsupported_candidates", unsupportedModalities)
-		}
-		return nil, &Error{Code: ErrorUnsupportedModality, Message: fmt.Sprintf("model %q does not support requested modalities", model), Param: "model"}
 	}
 	if foundModel && unavailableCandidates > 0 {
 		if r.logger != nil {

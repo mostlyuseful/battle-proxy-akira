@@ -119,7 +119,7 @@ func TestResolveTextOnlyRequestCanUseTextModel(t *testing.T) {
 	}
 }
 
-func TestResolveImageRequestUsesImageCapableDirectModel(t *testing.T) {
+func TestResolveImageRequestDirectModelIgnoresModalityPrecheck(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig()
@@ -134,8 +134,8 @@ func TestResolveImageRequestUsesImageCapableDirectModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if len(candidates) != 1 || candidates[0].ProviderName != "z_vision" {
-		t.Fatalf("candidates = %#v, want z_vision image-capable model", candidates)
+	if len(candidates) != 1 || candidates[0].ProviderName != "a_text" {
+		t.Fatalf("candidates = %#v, want lexicographically first direct model candidate", candidates)
 	}
 }
 
@@ -157,18 +157,23 @@ func TestResolveImageRequestFiltersSyntheticCandidates(t *testing.T) {
 	}
 }
 
-func TestResolveImageRequestUnsupportedModality(t *testing.T) {
+func TestResolveProviderQualifiedImageRequestIgnoresModalityPrecheck(t *testing.T) {
 	t.Parallel()
 
 	r := NewStatic(testConfig(), map[string]provider.Provider{
 		"codex_sub": fakeProvider{name: "codex_sub"},
 	})
 
-	_, err := r.Resolve(context.Background(), imageRequest("codex_sub:gpt-5.1-codex-max"))
-	assertRouterError(t, err, ErrorUnsupportedModality)
+	candidates, err := r.Resolve(context.Background(), imageRequest("codex_sub:gpt-5.1-codex-max"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ProviderName != "codex_sub" || candidates[0].ProviderModel != "gpt-5.1-codex-max" {
+		t.Fatalf("candidates = %#v", candidates)
+	}
 }
 
-func TestResolveMissingModalityMetadataIsTextOnly(t *testing.T) {
+func TestResolveMissingModalityMetadataDirectModelStillPassesThrough(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig()
@@ -178,8 +183,9 @@ func TestResolveMissingModalityMetadataIsTextOnly(t *testing.T) {
 	if _, err := r.Resolve(context.Background(), ir.Request{Model: "legacy-model"}); err != nil {
 		t.Fatalf("Resolve text request with missing modalities: %v", err)
 	}
-	_, err := r.Resolve(context.Background(), imageRequest("legacy-model"))
-	assertRouterError(t, err, ErrorUnsupportedModality)
+	if _, err := r.Resolve(context.Background(), imageRequest("legacy-model")); err != nil {
+		t.Fatalf("Resolve image request with missing modalities: %v", err)
+	}
 }
 
 func TestResolveUnknownModel(t *testing.T) {
