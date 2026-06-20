@@ -16,11 +16,12 @@ type Middleware func(http.Handler) http.Handler
 type Option func(*serverOptions)
 
 type serverOptions struct {
-	modelLister   ModelLister
-	chatRouter    router.Router
-	clientAuth    Middleware
-	requestLogger requestlog.Logger
-	maxBodyBytes  int64
+	modelLister     ModelLister
+	chatRouter      router.Router
+	responsesRouter router.Router
+	clientAuth      Middleware
+	requestLogger   requestlog.Logger
+	maxBodyBytes    int64
 }
 
 // WithModelLister configures the source used by GET /v1/models.
@@ -34,6 +35,14 @@ func WithModelLister(lister ModelLister) Option {
 func WithChatRouter(chatRouter router.Router) Option {
 	return func(opts *serverOptions) {
 		opts.chatRouter = chatRouter
+	}
+}
+
+// WithResponsesRouter configures the router used by POST /v1/responses.
+// When unset, the Responses endpoint reuses the chat router.
+func WithResponsesRouter(responsesRouter router.Router) Option {
+	return func(opts *serverOptions) {
+		opts.responsesRouter = responsesRouter
 	}
 }
 
@@ -81,11 +90,16 @@ func NewServer(options ...Option) http.Handler {
 	if opts.maxBodyBytes <= 0 {
 		opts.maxBodyBytes = config.DefaultMaxBodyBytes
 	}
+	responsesRouter := opts.responsesRouter
+	if responsesRouter == nil {
+		responsesRouter = opts.chatRouter
+	}
 
 	mux := http.NewServeMux()
 	RegisterHealthRoutes(mux)
 	RegisterModelRoutes(mux, opts.modelLister, opts.clientAuth)
 	RegisterChatRoutes(mux, opts.chatRouter, opts.clientAuth, opts.requestLogger, opts.maxBodyBytes)
+	RegisterResponsesRoutes(mux, responsesRouter, opts.clientAuth, opts.requestLogger, opts.maxBodyBytes)
 	return requestIDMiddleware(mux)
 }
 
