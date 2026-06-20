@@ -31,19 +31,19 @@ const (
 // upstream providers. It is used to extract text deltas and finish reasons when
 // translating a Chat Completions stream into Responses SSE events.
 type ChatCompletionChunk struct {
-	ID      string                        `json:"id,omitempty"`
-	Object  string                        `json:"object,omitempty"`
-	Created int64                         `json:"created,omitempty"`
-	Model   string                        `json:"model,omitempty"`
-	Choices []ChatCompletionChunkChoice   `json:"choices,omitempty"`
-	Usage   *ChatCompletionUsage          `json:"usage,omitempty"`
+	ID      string                      `json:"id,omitempty"`
+	Object  string                      `json:"object,omitempty"`
+	Created int64                       `json:"created,omitempty"`
+	Model   string                      `json:"model,omitempty"`
+	Choices []ChatCompletionChunkChoice `json:"choices,omitempty"`
+	Usage   *ChatCompletionUsage        `json:"usage,omitempty"`
 }
 
 // ChatCompletionChunkChoice is one choice in a streaming chunk.
 type ChatCompletionChunkChoice struct {
-	Index        int                     `json:"index"`
+	Index        int                      `json:"index"`
 	Delta        ChatCompletionChunkDelta `json:"delta"`
-	FinishReason *string                 `json:"finish_reason"`
+	FinishReason *string                  `json:"finish_reason"`
 }
 
 // ChatCompletionChunkDelta is the incremental delta within a streaming chunk.
@@ -69,10 +69,10 @@ type responsesContentPart struct {
 
 // responsesStreamItem is the message item shape used in streaming output_item events.
 type responsesStreamItem struct {
-	ID      string                `json:"id"`
-	Type    string                `json:"type"`
-	Role    string                `json:"role"`
-	Status  string                `json:"status"`
+	ID      string                 `json:"id"`
+	Type    string                 `json:"type"`
+	Role    string                 `json:"role"`
+	Status  string                 `json:"status"`
 	Content []responsesContentPart `json:"content"`
 }
 
@@ -82,16 +82,16 @@ type responseCreatedEvent struct {
 }
 
 type responseOutputItemAddedEvent struct {
-	Type         string            `json:"type"`
-	OutputIndex  int               `json:"output_index"`
-	Item         responsesStreamItem `json:"item"`
+	Type        string              `json:"type"`
+	OutputIndex int                 `json:"output_index"`
+	Item        responsesStreamItem `json:"item"`
 }
 
 type responseContentPartAddedEvent struct {
-	Type         string              `json:"type"`
-	ItemID       string              `json:"item_id"`
-	OutputIndex  int                 `json:"output_index"`
-	ContentIndex int                 `json:"content_index"`
+	Type         string               `json:"type"`
+	ItemID       string               `json:"item_id"`
+	OutputIndex  int                  `json:"output_index"`
+	ContentIndex int                  `json:"content_index"`
 	Part         responsesContentPart `json:"part"`
 }
 
@@ -112,10 +112,10 @@ type responseOutputTextDoneEvent struct {
 }
 
 type responseContentPartDoneEvent struct {
-	Type         string              `json:"type"`
-	ItemID       string              `json:"item_id"`
-	OutputIndex  int                 `json:"output_index"`
-	ContentIndex int                 `json:"content_index"`
+	Type         string               `json:"type"`
+	ItemID       string               `json:"item_id"`
+	OutputIndex  int                  `json:"output_index"`
+	ContentIndex int                  `json:"content_index"`
 	Part         responsesContentPart `json:"part"`
 }
 

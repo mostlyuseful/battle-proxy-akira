@@ -83,16 +83,16 @@ type ResponseInputContentPart struct {
 
 // Response is the OpenAI Responses API non-streaming response object.
 type Response struct {
-	ID         string                     `json:"id"`
-	Object     string                     `json:"object"`
-	CreatedAt  int64                      `json:"created_at"`
-	Model      string                     `json:"model"`
-	Status     string                     `json:"status,omitempty"`
-	Output     []ResponseOutputItem       `json:"output"`
-	Usage      *ResponseUsage             `json:"usage,omitempty"`
-	Error      *ResponseError             `json:"error,omitempty"`
-	Extra      map[string]json.RawMessage `json:"-"`
-	RawBody    json.RawMessage            `json:"-"`
+	ID        string                     `json:"id"`
+	Object    string                     `json:"object"`
+	CreatedAt int64                      `json:"created_at"`
+	Model     string                     `json:"model"`
+	Status    string                     `json:"status,omitempty"`
+	Output    []ResponseOutputItem       `json:"output"`
+	Usage     *ResponseUsage             `json:"usage,omitempty"`
+	Error     *ResponseError             `json:"error,omitempty"`
+	Extra     map[string]json.RawMessage `json:"-"`
+	RawBody   json.RawMessage            `json:"-"`
 }
 
 // ResponseOutputItem is one item in a Responses output array. MVP models the
@@ -110,9 +110,9 @@ type ResponseOutputItem struct {
 // ResponseOutputContent is one content part of a Responses output message.
 // MVP models output_text; refusal and other types are preserved in Raw.
 type ResponseOutputContent struct {
-	Type string                     `json:"type"`
-	Text string                     `json:"text,omitempty"`
-	Raw  json.RawMessage            `json:"-"`
+	Type  string                     `json:"type"`
+	Text  string                     `json:"text,omitempty"`
+	Raw   json.RawMessage            `json:"-"`
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
@@ -365,9 +365,9 @@ func responseOutputContentToIR(parts []ResponseOutputContent) ([]ir.ContentPart,
 
 // ResponseStatusCompleted and friends mirror OpenAI Responses item statuses.
 const (
-	ResponseStatusCompleted   = "completed"
-	ResponseStatusIncomplete  = "incomplete"
-	ResponseStatusInProgress  = "in_progress"
+	ResponseStatusCompleted  = "completed"
+	ResponseStatusIncomplete = "incomplete"
+	ResponseStatusInProgress = "in_progress"
 )
 
 func responseStatusForFinishReason(reason string) string {

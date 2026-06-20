@@ -118,11 +118,11 @@ func TestResponsesNonStreamingTextEndToEnd(t *testing.T) {
 	}
 
 	var body struct {
-		ID         string `json:"id"`
-		Object     string `json:"object"`
-		Model      string `json:"model"`
-		Status     string `json:"status"`
-		Output     []struct {
+		ID     string `json:"id"`
+		Object string `json:"object"`
+		Model  string `json:"model"`
+		Status string `json:"status"`
+		Output []struct {
 			Type    string `json:"type"`
 			Role    string `json:"role"`
 			Content []struct {
@@ -317,7 +317,7 @@ func TestResponsesStreamingPreStreamErrorReturnsJSON(t *testing.T) {
 	t.Parallel()
 
 	provider := &responsesStreamProvider{
-		name: "test_provider",
+		name:      "test_provider",
 		streamErr: &providerpkg.Error{Code: providerpkg.ErrorProviderRateLimited, Retryable: false, Provider: "test_provider"},
 	}
 	handler := NewServer(WithResponsesRouter(newResponsesRouter(provider)))
@@ -345,7 +345,7 @@ func TestResponsesStreamingPreStreamRetryableFallsBack(t *testing.T) {
 	t.Parallel()
 
 	failing := &responsesStreamProvider{
-		name: "failing",
+		name:      "failing",
 		streamErr: &providerpkg.Error{Code: providerpkg.ErrorProviderRateLimited, Retryable: true, Provider: "failing"},
 	}
 	success := &responsesStreamProvider{
@@ -517,12 +517,12 @@ func TestResponsesErrors(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		body        string
-		provider    *responsesFakeProvider
-		wantStatus  int
-		wantCode    ErrorCode
-		wantNoCall  bool
+		name       string
+		body       string
+		provider   *responsesFakeProvider
+		wantStatus int
+		wantCode   ErrorCode
+		wantNoCall bool
 	}{
 		{
 			name:       "bad json",
@@ -539,11 +539,11 @@ func TestResponsesErrors(t *testing.T) {
 			wantNoCall: true,
 		},
 		{
-			name:        "upstream failure",
-			body:        `{"model":"gpt-test","input":"hi"}`,
-			provider:    &responsesFakeProvider{name: "test_provider", err: &providerpkg.Error{Code: providerpkg.ErrorUpstream, Retryable: false, Provider: "test_provider"}},
-			wantStatus:  http.StatusBadGateway,
-			wantCode:    ErrorUpstream,
+			name:       "upstream failure",
+			body:       `{"model":"gpt-test","input":"hi"}`,
+			provider:   &responsesFakeProvider{name: "test_provider", err: &providerpkg.Error{Code: providerpkg.ErrorUpstream, Retryable: false, Provider: "test_provider"}},
+			wantStatus: http.StatusBadGateway,
+			wantCode:   ErrorUpstream,
 		},
 	}
 
@@ -696,12 +696,12 @@ func (r *multiCandidateRouter) MarkSuccess(router.RouteCandidate)        {}
 // responsesStreamProvider is a fake provider that emits Chat Completions-shaped
 // streaming chunks, matching the real OpenAI-compatible provider's ir.Event shape.
 type responsesStreamProvider struct {
-	name        string
-	chunks      []string
-	finishDone  bool
-	streamErr   error
+	name         string
+	chunks       []string
+	finishDone   bool
+	streamErr    error
 	midStreamErr error
-	streamed    int
+	streamed     int
 }
 
 func (p *responsesStreamProvider) Name() string { return p.name }
