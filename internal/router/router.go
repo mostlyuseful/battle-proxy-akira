@@ -38,7 +38,20 @@ type RouteCandidate struct {
 	ProviderName   string
 	ProviderModel  string
 	RequestedModel string
+	Synthetic      bool
 	Provider       provider.Provider
+}
+
+// ProviderRequest returns a copy of req targeted at the concrete provider model.
+func (c RouteCandidate) ProviderRequest(req ir.Request) ir.Request {
+	req.Model = c.ProviderModel
+	return req
+}
+
+// RewriteResponse returns a copy of resp with the client-requested model name.
+func (c RouteCandidate) RewriteResponse(resp ir.Response) ir.Response {
+	resp.Model = c.RequestedModel
+	return resp
 }
 
 // Router resolves requests to route candidates and records route outcomes.
@@ -48,13 +61,13 @@ type Router interface {
 	MarkSuccess(candidate RouteCandidate)
 }
 
-// StaticRouter resolves only direct configured provider/model pairs.
+// StaticRouter resolves configured direct models and first_available synthetic aliases.
 type StaticRouter struct {
 	cfg       config.Config
 	providers map[string]provider.Provider
 }
 
-// NewStatic creates a deterministic router for configured direct models.
+// NewStatic creates a deterministic router for configured direct and synthetic models.
 func NewStatic(cfg config.Config, providers map[string]provider.Provider) *StaticRouter {
 	if providers == nil {
 		providers = map[string]provider.Provider{}
@@ -62,7 +75,7 @@ func NewStatic(cfg config.Config, providers map[string]provider.Provider) *Stati
 	return &StaticRouter{cfg: cfg, providers: providers}
 }
 
-// Resolve returns a single direct route candidate for req.Model.
+// Resolve returns route candidates for req.Model.
 func (r *StaticRouter) Resolve(ctx context.Context, req ir.Request) ([]RouteCandidate, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -75,7 +88,63 @@ func (r *StaticRouter) Resolve(ctx context.Context, req ir.Request) ([]RouteCand
 	if providerName, providerModel, ok := strings.Cut(model, ":"); ok {
 		return r.resolveProviderModel(providerName, providerModel, model)
 	}
+	if synthetic, ok := r.cfg.SyntheticModels[model]; ok {
+		return r.resolveSyntheticModel(model, synthetic)
+	}
 	return r.resolveDirectModel(model)
+}
+
+// Models returns configured direct models plus exposed synthetic aliases.
+func (r *StaticRouter) Models(ctx context.Context) ([]ir.Model, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	modelsByID := map[string]ir.Model{}
+	for _, providerName := range sortedProviderNames(r.cfg.Providers) {
+		providerCfg := r.cfg.Providers[providerName]
+		modelNames := sortedModelNames(providerCfg.Models)
+		for _, modelName := range modelNames {
+			modelCfg := providerCfg.Models[modelName]
+			if _, exists := modelsByID[modelName]; exists {
+				continue
+			}
+			modelsByID[modelName] = ir.Model{
+				ID:         modelName,
+				Provider:   providerName,
+				Name:       modelName,
+				Modalities: append([]string(nil), modelCfg.Modalities...),
+			}
+		}
+	}
+
+	for _, alias := range sortedSyntheticNames(r.cfg.SyntheticModels) {
+		synthetic := r.cfg.SyntheticModels[alias]
+		if !synthetic.Expose {
+			continue
+		}
+		modelsByID[alias] = ir.Model{
+			ID:        alias,
+			Provider:  "proxy",
+			Name:      alias,
+			Synthetic: true,
+			Metadata: map[string]string{
+				"strategy": synthetic.Strategy,
+			},
+		}
+	}
+
+	ids := make([]string, 0, len(modelsByID))
+	for id := range modelsByID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	models := make([]ir.Model, 0, len(ids))
+	for _, id := range ids {
+		models = append(models, modelsByID[id])
+	}
+	return models, nil
 }
 
 // MarkFailure is a no-op for the static router. Later routers add fallback and circuit state.
@@ -83,6 +152,48 @@ func (r *StaticRouter) MarkFailure(candidate RouteCandidate, err error) {}
 
 // MarkSuccess is a no-op for the static router. Later routers add fallback and circuit state.
 func (r *StaticRouter) MarkSuccess(candidate RouteCandidate) {}
+
+func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.SyntheticModelConfig) ([]RouteCandidate, error) {
+	if synthetic.Strategy != config.SyntheticStrategyFirstAvailable {
+		return nil, &Error{Code: ErrorNoAvailableModel, Message: fmt.Sprintf("synthetic model %q uses unsupported strategy %q", alias, synthetic.Strategy), Param: "model"}
+	}
+
+	candidates := make([]RouteCandidate, 0, len(synthetic.Candidates))
+	missingProviders := 0
+	for _, candidate := range synthetic.Candidates {
+		providerName, providerModel, ok := strings.Cut(candidate, ":")
+		if !ok || providerName == "" || providerModel == "" {
+			return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("synthetic model %q contains invalid candidate %q", alias, candidate), Param: "model"}
+		}
+		providerCfg, ok := r.cfg.Providers[providerName]
+		if !ok {
+			return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("synthetic model %q references unknown provider %q", alias, providerName), Param: "model"}
+		}
+		if _, ok := providerCfg.Models[providerModel]; !ok {
+			return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("synthetic model %q references unknown model %q for provider %q", alias, providerModel, providerName), Param: "model"}
+		}
+		p, ok := r.providers[providerName]
+		if !ok || p == nil {
+			missingProviders++
+			continue
+		}
+		candidates = append(candidates, RouteCandidate{
+			ProviderName:   providerName,
+			ProviderModel:  providerModel,
+			RequestedModel: alias,
+			Synthetic:      true,
+			Provider:       p,
+		})
+	}
+	if len(candidates) == 0 {
+		code := ErrorUnknownModel
+		if missingProviders > 0 {
+			code = ErrorNoAvailableModel
+		}
+		return nil, &Error{Code: code, Message: fmt.Sprintf("no available provider for synthetic model %q", alias), Param: "model"}
+	}
+	return candidates, nil
+}
 
 func (r *StaticRouter) resolveProviderModel(providerName, providerModel, requestedModel string) ([]RouteCandidate, error) {
 	providerName = strings.TrimSpace(providerName)
@@ -129,6 +240,24 @@ func (r *StaticRouter) candidate(providerName, providerModel, requestedModel str
 func sortedProviderNames(providers map[string]config.ProviderConfig) []string {
 	names := make([]string, 0, len(providers))
 	for name := range providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func sortedModelNames(models map[string]config.ModelConfig) []string {
+	names := make([]string, 0, len(models))
+	for name := range models {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func sortedSyntheticNames(models map[string]config.SyntheticModelConfig) []string {
+	names := make([]string, 0, len(models))
+	for name := range models {
 		names = append(names, name)
 	}
 	sort.Strings(names)

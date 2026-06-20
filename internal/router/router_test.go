@@ -140,6 +140,116 @@ func TestResolveHonorsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestResolveSyntheticModelAliasInConfiguredOrder(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfigWithSynthetic()
+	r := NewStatic(cfg, map[string]provider.Provider{
+		"codex_sub":  fakeProvider{name: "codex_sub"},
+		"openai_api": fakeProvider{name: "openai_api"},
+	})
+
+	candidates, err := r.Resolve(context.Background(), ir.Request{Model: "coding"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(candidates) != 2 {
+		t.Fatalf("candidates length = %d, want 2", len(candidates))
+	}
+	if candidates[0].ProviderName != "codex_sub" || candidates[0].ProviderModel != "gpt-5.1-codex-max" {
+		t.Fatalf("first candidate = %#v", candidates[0])
+	}
+	if candidates[1].ProviderName != "openai_api" || candidates[1].ProviderModel != "gpt-5.2" {
+		t.Fatalf("second candidate = %#v", candidates[1])
+	}
+	for _, candidate := range candidates {
+		if candidate.RequestedModel != "coding" {
+			t.Fatalf("RequestedModel = %q, want coding", candidate.RequestedModel)
+		}
+		if !candidate.Synthetic {
+			t.Fatalf("Synthetic = false for candidate %#v", candidate)
+		}
+	}
+}
+
+func TestResolveSyntheticModelSkipsMissingProviderInstances(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfigWithSynthetic()
+	r := NewStatic(cfg, map[string]provider.Provider{
+		"openai_api": fakeProvider{name: "openai_api"},
+	})
+
+	candidates, err := r.Resolve(context.Background(), ir.Request{Model: "coding"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ProviderName != "openai_api" {
+		t.Fatalf("candidates = %#v, want only openai_api", candidates)
+	}
+}
+
+func TestResolveSyntheticModelNoAvailableProviders(t *testing.T) {
+	t.Parallel()
+
+	r := NewStatic(testConfigWithSynthetic(), nil)
+
+	_, err := r.Resolve(context.Background(), ir.Request{Model: "coding"})
+	assertRouterError(t, err, ErrorNoAvailableModel)
+}
+
+func TestModelsIncludesExposedSyntheticAliases(t *testing.T) {
+	t.Parallel()
+
+	r := NewStatic(testConfigWithSynthetic(), nil)
+
+	models, err := r.Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+	byID := map[string]ir.Model{}
+	for _, model := range models {
+		byID[model.ID] = model
+	}
+	if !byID["coding"].Synthetic {
+		t.Fatalf("coding model = %#v, want synthetic", byID["coding"])
+	}
+	if _, ok := byID["hidden_alias"]; ok {
+		t.Fatalf("hidden_alias should not be exposed: %#v", models)
+	}
+	if byID["gpt-5.2"].Synthetic {
+		t.Fatalf("direct model gpt-5.2 should not be synthetic")
+	}
+}
+
+func TestRouteCandidateProviderRequestAndResponseRewrite(t *testing.T) {
+	t.Parallel()
+
+	candidate := RouteCandidate{
+		ProviderName:   "codex_sub",
+		ProviderModel:  "gpt-5.1-codex-max",
+		RequestedModel: "coding",
+		Synthetic:      true,
+	}
+	providerReq := candidate.ProviderRequest(ir.Request{Model: "coding"})
+	if providerReq.Model != "gpt-5.1-codex-max" {
+		t.Fatalf("provider request model = %q, want provider model", providerReq.Model)
+	}
+	rewritten := candidate.RewriteResponse(ir.Response{Model: "gpt-5.1-codex-max"})
+	if rewritten.Model != "coding" {
+		t.Fatalf("rewritten response model = %q, want coding", rewritten.Model)
+	}
+}
+
+func TestResolveUnknownAliasFallsThroughToUnknownModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewStatic(testConfigWithSynthetic(), nil)
+
+	_, err := r.Resolve(context.Background(), ir.Request{Model: "unknown_alias"})
+	assertRouterError(t, err, ErrorUnknownModel)
+}
+
 func assertRouterError(t *testing.T, err error, wantCode string) {
 	t.Helper()
 	if err == nil {
@@ -169,6 +279,26 @@ func testConfig() config.Config {
 			Models: map[string]config.ModelConfig{
 				"gpt-5.1-codex-max": {Modalities: []string{ir.ModalityText}},
 			},
+		},
+	}
+	return cfg
+}
+
+func testConfigWithSynthetic() config.Config {
+	cfg := testConfig()
+	cfg.SyntheticModels = map[string]config.SyntheticModelConfig{
+		"coding": {
+			Strategy: config.SyntheticStrategyFirstAvailable,
+			Expose:   true,
+			Candidates: []string{
+				"codex_sub:gpt-5.1-codex-max",
+				"openai_api:gpt-5.2",
+			},
+		},
+		"hidden_alias": {
+			Strategy:   config.SyntheticStrategyFirstAvailable,
+			Expose:     false,
+			Candidates: []string{"openai_api:gpt-5.2"},
 		},
 	}
 	return cfg
