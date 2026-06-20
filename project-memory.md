@@ -169,3 +169,10 @@
 - Decision: implement `env_access_token`, `file_access_token`, and `access_token_command` under the existing `TokenSource` interface. Env and file sources trim whitespace and reject empty values. Command sources execute the configured command directly, parse JSON with `access_token` and optional RFC3339 `expires_at`, reject malformed/empty/expired tokens, and do not cache tokens yet. Errors identify source type/path/env/command failure class but never include token values or command output.
 - Rejected alternatives: caching command tokens until `expires_at`, because token cache/refresh behavior has separate future work; accepting plain-text command output, because the spec requires JSON and future expiry metadata.
 - Affected area: provider auth construction, access-token based providers, future token caching/refresh and exhaustion handling.
+
+### Access-token cache behavior
+
+- Context: `auth.token-cache` needed command/access-token caching without leaking token values and while avoiding concurrent command stampedes.
+- Decision: cache only command-source tokens that include valid `expires_at`; refresh when `expires_at <= now + refresh_before_seconds`. Sources or command outputs without expiry are handled conservatively as uncached one-shot tokens, so env/file sources and no-expiry command outputs are re-read/re-run. Command token refresh is guarded by a mutex so concurrent callers share one in-flight refresh and then use the cached token.
+- Rejected alternatives: caching no-expiry tokens forever or for an arbitrary TTL, because without expiry metadata there is no safe refresh window; adding a background refresh goroutine, because on-demand refresh is simpler and enough for MVP.
+- Affected area: access-token command auth, provider auth construction, future refresh/backoff/exhaustion handling.

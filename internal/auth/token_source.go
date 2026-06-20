@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"battle-proxy-akira/internal/config"
@@ -48,9 +49,17 @@ type AccessTokenFileSource struct {
 
 // AccessTokenCommandSource retrieves an OAuth/access-token style bearer token from a command.
 type AccessTokenCommandSource struct {
-	command []string
-	run     func(context.Context, []string) ([]byte, error)
-	now     func() time.Time
+	command       []string
+	refreshBefore time.Duration
+	run           func(context.Context, []string) ([]byte, error)
+	now           func() time.Time
+	mu            sync.Mutex
+	cached        cachedAccessToken
+}
+
+type cachedAccessToken struct {
+	token     string
+	expiresAt time.Time
 }
 
 // NewBearerEnvTokenSource creates a token source for bearer_env provider auth.
@@ -82,11 +91,19 @@ func NewAccessTokenFileSource(file string) (*AccessTokenFileSource, error) {
 
 // NewAccessTokenCommandSource creates a token source for access_token_command provider auth.
 func NewAccessTokenCommandSource(command []string) (*AccessTokenCommandSource, error) {
+	return NewAccessTokenCommandSourceWithRefresh(command, 0)
+}
+
+// NewAccessTokenCommandSourceWithRefresh creates a command source with an expiry refresh window.
+func NewAccessTokenCommandSourceWithRefresh(command []string, refreshBefore time.Duration) (*AccessTokenCommandSource, error) {
 	clean := normalizeCommand(command)
 	if len(clean) == 0 {
 		return nil, fmt.Errorf("access_token_command auth requires command: %w", ErrMissingToken)
 	}
-	return &AccessTokenCommandSource{command: clean, run: runCommand, now: time.Now}, nil
+	if refreshBefore < 0 {
+		refreshBefore = 0
+	}
+	return &AccessTokenCommandSource{command: clean, refreshBefore: refreshBefore, run: runCommand, now: time.Now}, nil
 }
 
 // NewTokenSource creates a TokenSource for the supported provider auth config.
@@ -99,7 +116,7 @@ func NewTokenSource(auth config.AuthConfig) (TokenSource, error) {
 	case config.AuthTypeFileAccessToken:
 		return NewAccessTokenFileSource(auth.File)
 	case config.AuthTypeCommandAccessToken:
-		return NewAccessTokenCommandSource(auth.Command)
+		return NewAccessTokenCommandSourceWithRefresh(auth.Command, time.Duration(auth.RefreshBeforeSeconds)*time.Second)
 	default:
 		return nil, fmt.Errorf("%s: %w", auth.Type, ErrUnsupportedAuthType)
 	}
@@ -150,31 +167,60 @@ func (s *AccessTokenCommandSource) Token(ctx context.Context) (string, error) {
 	if s == nil || len(s.command) == 0 {
 		return "", fmt.Errorf("access_token_command token source is not configured: %w", ErrMissingToken)
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now
+	if s.now != nil {
+		now = s.now
+	}
+	if s.cached.token != "" && s.cached.expiresAt.After(now().Add(s.refreshBefore)) {
+		return s.cached.token, nil
+	}
+
 	out, err := s.run(ctx, s.command)
 	if err != nil {
 		return "", fmt.Errorf("provider access token command failed: %w", ErrMissingToken)
 	}
+	result, err := parseCommandToken(out, now())
+	if err != nil {
+		return "", err
+	}
+	if !result.expiresAt.IsZero() {
+		s.cached = result
+	} else {
+		// Without expiry metadata there is no safe refresh window, so command
+		// output is treated as one-shot and is not cached.
+		s.cached = cachedAccessToken{}
+	}
+	return result.token, nil
+}
+
+func parseCommandToken(out []byte, now time.Time) (cachedAccessToken, error) {
 	var payload struct {
 		AccessToken string `json:"access_token"`
 		ExpiresAt   string `json:"expires_at"`
 	}
 	if err := json.Unmarshal(out, &payload); err != nil {
-		return "", fmt.Errorf("provider access token command output: %w", ErrMalformedToken)
+		return cachedAccessToken{}, fmt.Errorf("provider access token command output: %w", ErrMalformedToken)
 	}
+	token, err := nonEmptyToken(payload.AccessToken, "provider access token command")
+	if err != nil {
+		return cachedAccessToken{}, err
+	}
+	result := cachedAccessToken{token: token}
 	if payload.ExpiresAt != "" {
 		expiresAt, err := time.Parse(time.RFC3339, payload.ExpiresAt)
 		if err != nil {
-			return "", fmt.Errorf("provider access token command expires_at: %w", ErrMalformedToken)
+			return cachedAccessToken{}, fmt.Errorf("provider access token command expires_at: %w", ErrMalformedToken)
 		}
-		now := time.Now
-		if s.now != nil {
-			now = s.now
+		if !expiresAt.After(now) {
+			return cachedAccessToken{}, fmt.Errorf("provider access token command returned expired token: %w", ErrMissingToken)
 		}
-		if !expiresAt.After(now()) {
-			return "", fmt.Errorf("provider access token command returned expired token: %w", ErrMissingToken)
-		}
+		result.expiresAt = expiresAt
 	}
-	return nonEmptyToken(payload.AccessToken, "provider access token command")
+	return result, nil
 }
 
 func tokenFromEnv(env string, lookup func(string) (string, bool), label string) (string, error) {

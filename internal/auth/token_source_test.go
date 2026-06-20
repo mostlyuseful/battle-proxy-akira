@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -194,6 +195,113 @@ func TestAccessTokenCommandSourceAcceptsMissingExpiry(t *testing.T) {
 	}
 	if token != "command-token-secret" {
 		t.Fatalf("token = %q, want command-token-secret", token)
+	}
+}
+
+func TestAccessTokenCommandSourceCachesUntilRefreshWindow(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	source, err := NewAccessTokenCommandSourceWithRefresh([]string{"fake-token-command"}, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("NewAccessTokenCommandSourceWithRefresh: %v", err)
+	}
+	source.now = func() time.Time { return now }
+	calls := 0
+	source.run = func(context.Context, []string) ([]byte, error) {
+		calls++
+		return []byte(fmt.Sprintf(`{"access_token":"token-%d","expires_at":%q}`, calls, now.Add(10*time.Minute).Format(time.RFC3339))), nil
+	}
+
+	first, err := source.Token(context.Background())
+	if err != nil {
+		t.Fatalf("first Token: %v", err)
+	}
+	second, err := source.Token(context.Background())
+	if err != nil {
+		t.Fatalf("second Token: %v", err)
+	}
+	if first != "token-1" || second != "token-1" || calls != 1 {
+		t.Fatalf("tokens/calls = %q/%q/%d, want cached token-1/token-1/1", first, second, calls)
+	}
+
+	now = now.Add(6 * time.Minute)
+	third, err := source.Token(context.Background())
+	if err != nil {
+		t.Fatalf("third Token: %v", err)
+	}
+	if third != "token-2" || calls != 2 {
+		t.Fatalf("third/calls = %q/%d, want refreshed token-2/2", third, calls)
+	}
+}
+
+func TestAccessTokenCommandSourceDoesNotCacheWithoutExpiry(t *testing.T) {
+	t.Parallel()
+
+	source, err := NewAccessTokenCommandSource([]string{"fake-token-command"})
+	if err != nil {
+		t.Fatalf("NewAccessTokenCommandSource: %v", err)
+	}
+	calls := 0
+	source.run = func(context.Context, []string) ([]byte, error) {
+		calls++
+		return []byte(fmt.Sprintf(`{"access_token":"token-%d"}`, calls)), nil
+	}
+
+	first, err := source.Token(context.Background())
+	if err != nil {
+		t.Fatalf("first Token: %v", err)
+	}
+	second, err := source.Token(context.Background())
+	if err != nil {
+		t.Fatalf("second Token: %v", err)
+	}
+	if first != "token-1" || second != "token-2" || calls != 2 {
+		t.Fatalf("tokens/calls = %q/%q/%d, want uncached token-1/token-2/2", first, second, calls)
+	}
+}
+
+func TestAccessTokenCommandSourceConcurrentRequestsShareRefresh(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	source, err := NewAccessTokenCommandSourceWithRefresh([]string{"fake-token-command"}, time.Minute)
+	if err != nil {
+		t.Fatalf("NewAccessTokenCommandSourceWithRefresh: %v", err)
+	}
+	source.now = func() time.Time { return now }
+	calls := 0
+	source.run = func(context.Context, []string) ([]byte, error) {
+		calls++
+		return []byte(fmt.Sprintf(`{"access_token":"token-%d","expires_at":%q}`, calls, now.Add(time.Hour).Format(time.RFC3339))), nil
+	}
+
+	const workers = 16
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			token, err := source.Token(context.Background())
+			if err != nil {
+				errs <- err
+				return
+			}
+			if token != "token-1" {
+				errs <- fmt.Errorf("token = %q, want token-1", token)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("command calls = %d, want 1", calls)
 	}
 }
 
