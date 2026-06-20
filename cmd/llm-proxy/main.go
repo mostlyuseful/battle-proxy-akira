@@ -27,9 +27,15 @@ const (
 func main() {
 	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	verbose := flags.Bool("verbose", false, "log informational and debug messages")
+	help := flags.Bool("help", false, "show usage information")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		slog.Error("parse flags", "error", err)
 		os.Exit(1)
+	}
+	if *help {
+		flags.SetOutput(os.Stdout)
+		flags.Usage()
+		os.Exit(0)
 	}
 
 	cfg, err := loadRuntimeConfigWithVerbose(*verbose, slog.Default())
