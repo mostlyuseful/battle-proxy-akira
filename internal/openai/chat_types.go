@@ -32,7 +32,7 @@ type ChatCompletionRequest struct {
 	RawBody             json.RawMessage            `json:"-"`
 }
 
-// ChatMessage is the text-only subset of an OpenAI chat message supported by this task.
+// ChatMessage is one OpenAI-compatible chat message.
 type ChatMessage struct {
 	Role    string                     `json:"role"`
 	Content ChatMessageContent         `json:"content"`
@@ -40,9 +40,25 @@ type ChatMessage struct {
 	Extra   map[string]json.RawMessage `json:"-"`
 }
 
-// ChatMessageContent currently supports simple string content. Multimodal arrays are added later.
+// ChatMessageContent supports simple string content or multimodal content parts.
 type ChatMessageContent struct {
-	Text string
+	Text  string
+	Parts []ChatContentPart
+}
+
+// ChatContentPart is one OpenAI-compatible chat message content part.
+type ChatContentPart struct {
+	Type     string                     `json:"type"`
+	Text     string                     `json:"text,omitempty"`
+	ImageURL *ChatImageURL              `json:"image_url,omitempty"`
+	Extra    map[string]json.RawMessage `json:"-"`
+}
+
+// ChatImageURL is the nested image_url object used by Chat Completions.
+type ChatImageURL struct {
+	URL    string                     `json:"url"`
+	Detail string                     `json:"detail,omitempty"`
+	Extra  map[string]json.RawMessage `json:"-"`
 }
 
 // StopSequences accepts either a single stop string or an array of stop strings.
@@ -78,11 +94,26 @@ func ChatCompletionRequestFromIR(req ir.Request) (ChatCompletionRequest, error) 
 	messages := make([]ChatMessage, 0, len(req.Messages))
 	for i, message := range req.Messages {
 		chatMessage := ChatMessage{Role: message.Role}
-		for _, part := range message.Content {
-			if part.Type != ir.ContentTypeText {
-				return ChatCompletionRequest{}, fmt.Errorf("chat message %d contains unsupported content part type %q", i, part.Type)
+		if messageHasImages(message) {
+			parts := make([]ChatContentPart, 0, len(message.Content))
+			for _, part := range message.Content {
+				switch part.Type {
+				case ir.ContentTypeText:
+					parts = append(parts, ChatContentPart{Type: ir.ContentTypeText, Text: part.Text})
+				case ir.ContentTypeImageURL:
+					parts = append(parts, ChatContentPart{Type: ir.ContentTypeImageURL, ImageURL: &ChatImageURL{URL: part.ImageURL, Detail: part.Detail}})
+				default:
+					return ChatCompletionRequest{}, fmt.Errorf("chat message %d contains unsupported content part type %q", i, part.Type)
+				}
 			}
-			chatMessage.Content.Text += part.Text
+			chatMessage.Content.Parts = parts
+		} else {
+			for _, part := range message.Content {
+				if part.Type != ir.ContentTypeText {
+					return ChatCompletionRequest{}, fmt.Errorf("chat message %d contains unsupported content part type %q", i, part.Type)
+				}
+				chatMessage.Content.Text += part.Text
+			}
 		}
 		messages = append(messages, chatMessage)
 	}
@@ -218,14 +249,13 @@ func (r ChatCompletionRequest) ToIR() (ir.Request, error) {
 		if message.Role == "" {
 			return ir.Request{}, fmt.Errorf("chat completion message %d role is required", i)
 		}
+		content, err := message.Content.ToIRContentParts()
+		if err != nil {
+			return ir.Request{}, fmt.Errorf("chat completion message %d content: %w", i, err)
+		}
 		messages = append(messages, ir.Message{
-			Role: message.Role,
-			Content: []ir.ContentPart{
-				{
-					Type: ir.ContentTypeText,
-					Text: message.Content.Text,
-				},
-			},
+			Role:    message.Role,
+			Content: content,
 		})
 	}
 
@@ -297,19 +327,31 @@ func ChatCompletionResponseFromIR(resp ir.Response, created time.Time) ChatCompl
 }
 
 func chatMessageToIR(message ChatMessage) ir.Message {
+	content, err := message.Content.ToIRContentParts()
+	if err != nil {
+		content = []ir.ContentPart{{Type: ir.ContentTypeText, Text: message.Content.Text}}
+	}
 	return ir.Message{
-		Role: message.Role,
-		Content: []ir.ContentPart{
-			{
-				Type: ir.ContentTypeText,
-				Text: message.Content.Text,
-			},
-		},
+		Role:    message.Role,
+		Content: content,
 	}
 }
 
-// ChatMessageFromIR converts a text IR message to an OpenAI-compatible chat message.
+// ChatMessageFromIR converts an IR message to an OpenAI-compatible chat message.
 func ChatMessageFromIR(message ir.Message) ChatMessage {
+	if messageHasImages(message) {
+		parts := make([]ChatContentPart, 0, len(message.Content))
+		for _, part := range message.Content {
+			switch part.Type {
+			case ir.ContentTypeText:
+				parts = append(parts, ChatContentPart{Type: ir.ContentTypeText, Text: part.Text})
+			case ir.ContentTypeImageURL:
+				parts = append(parts, ChatContentPart{Type: ir.ContentTypeImageURL, ImageURL: &ChatImageURL{URL: part.ImageURL, Detail: part.Detail}})
+			}
+		}
+		return ChatMessage{Role: message.Role, Content: ChatMessageContent{Parts: parts}}
+	}
+
 	var text bytes.Buffer
 	for _, part := range message.Content {
 		if part.Type == ir.ContentTypeText {
@@ -322,19 +364,129 @@ func ChatMessageFromIR(message ir.Message) ChatMessage {
 	}
 }
 
-// UnmarshalJSON decodes only simple string message content for this MVP task.
+// UnmarshalJSON decodes simple string or multimodal array message content.
 func (c *ChatMessageContent) UnmarshalJSON(data []byte) error {
 	var text string
-	if err := json.Unmarshal(data, &text); err != nil {
-		return errors.New("chat message content must be a string; multimodal content parts are not supported yet")
+	if err := json.Unmarshal(data, &text); err == nil {
+		c.Text = text
+		c.Parts = nil
+		return nil
 	}
-	c.Text = text
+	var parts []ChatContentPart
+	if err := json.Unmarshal(data, &parts); err != nil {
+		return errors.New("chat message content must be a string or an array of content parts")
+	}
+	c.Text = ""
+	c.Parts = parts
 	return nil
 }
 
-// MarshalJSON emits simple string message content.
+// MarshalJSON emits simple string content unless multimodal parts are present.
 func (c ChatMessageContent) MarshalJSON() ([]byte, error) {
+	if c.Parts != nil {
+		return json.Marshal(c.Parts)
+	}
 	return json.Marshal(c.Text)
+}
+
+// ToIRContentParts normalizes chat content into provider-neutral IR content parts.
+func (c ChatMessageContent) ToIRContentParts() ([]ir.ContentPart, error) {
+	if c.Parts == nil {
+		return []ir.ContentPart{{Type: ir.ContentTypeText, Text: c.Text}}, nil
+	}
+	parts := make([]ir.ContentPart, 0, len(c.Parts))
+	for i, part := range c.Parts {
+		switch part.Type {
+		case ir.ContentTypeText:
+			parts = append(parts, ir.ContentPart{Type: ir.ContentTypeText, Text: part.Text})
+		case ir.ContentTypeImageURL:
+			if part.ImageURL == nil || part.ImageURL.URL == "" {
+				return nil, fmt.Errorf("content part %d image_url.url is required", i)
+			}
+			parts = append(parts, ir.ContentPart{Type: ir.ContentTypeImageURL, ImageURL: part.ImageURL.URL, Detail: part.ImageURL.Detail})
+		default:
+			return nil, fmt.Errorf("content part %d has unsupported type %q", i, part.Type)
+		}
+	}
+	return parts, nil
+}
+
+func messageHasImages(message ir.Message) bool {
+	for _, part := range message.Content {
+		if part.Type == ir.ContentTypeImageURL || part.ImageURL != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// UnmarshalJSON decodes and validates supported chat content part shapes.
+func (p *ChatContentPart) UnmarshalJSON(data []byte) error {
+	type alias ChatContentPart
+	var decoded alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+
+	switch decoded.Type {
+	case ir.ContentTypeText:
+		raw, ok := fields["text"]
+		if !ok {
+			return errors.New("text content part requires text")
+		}
+		if err := json.Unmarshal(raw, &decoded.Text); err != nil {
+			return errors.New("text content part text must be a string")
+		}
+		decoded.ImageURL = nil
+	case ir.ContentTypeImageURL:
+		raw, ok := fields["image_url"]
+		if !ok {
+			return errors.New("image_url content part requires image_url")
+		}
+		var image ChatImageURL
+		if err := json.Unmarshal(raw, &image); err != nil {
+			return fmt.Errorf("image_url content part image_url: %w", err)
+		}
+		if image.URL == "" {
+			return errors.New("image_url content part requires image_url.url")
+		}
+		decoded.ImageURL = &image
+		decoded.Text = ""
+	case "":
+		return errors.New("content part type is required")
+	default:
+		return fmt.Errorf("unsupported chat content part type %q", decoded.Type)
+	}
+
+	for _, key := range []string{"type", "text", "image_url"} {
+		delete(fields, key)
+	}
+	decoded.Extra = fields
+	*p = ChatContentPart(decoded)
+	return nil
+}
+
+// UnmarshalJSON preserves unknown image_url fields while decoding known fields.
+func (u *ChatImageURL) UnmarshalJSON(data []byte) error {
+	type alias ChatImageURL
+	var decoded alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, key := range []string{"url", "detail"} {
+		delete(fields, key)
+	}
+	decoded.Extra = fields
+	*u = ChatImageURL(decoded)
+	return nil
 }
 
 // UnmarshalJSON preserves unknown message fields while decoding known message fields.

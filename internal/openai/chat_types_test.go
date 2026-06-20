@@ -111,15 +111,129 @@ func TestParseChatCompletionRequestSingleStopString(t *testing.T) {
 	}
 }
 
-func TestParseChatCompletionRequestRejectsMultimodalContentForNow(t *testing.T) {
+func TestParseChatCompletionRequestToIRTextAndImageParts(t *testing.T) {
 	t.Parallel()
 
-	_, err := ParseChatCompletionRequest([]byte(`{
-		"model": "coding",
-		"messages": [{"role": "user", "content": [{"type":"text","text":"hello"}]}]
+	req, err := ParseChatCompletionRequest([]byte(`{
+		"model": "vision-model",
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "what is in this image?"},
+				{"type": "image_url", "image_url": {"url": "https://example.test/cat.png", "detail": "high"}}
+			]
+		}]
 	}`))
-	if err == nil {
-		t.Fatal("ParseChatCompletionRequest returned nil error, want unsupported content error")
+	if err != nil {
+		t.Fatalf("ParseChatCompletionRequest: %v", err)
+	}
+	got, err := req.ToIR()
+	if err != nil {
+		t.Fatalf("ToIR: %v", err)
+	}
+
+	parts := got.Messages[0].Content
+	if len(parts) != 2 {
+		t.Fatalf("content parts length = %d, want 2", len(parts))
+	}
+	if parts[0].Type != ir.ContentTypeText || parts[0].Text != "what is in this image?" {
+		t.Fatalf("text part = %#v", parts[0])
+	}
+	if parts[1].Type != ir.ContentTypeImageURL || parts[1].ImageURL != "https://example.test/cat.png" || parts[1].Detail != "high" {
+		t.Fatalf("image part = %#v", parts[1])
+	}
+	if !got.HasImages() {
+		t.Fatal("HasImages = false, want true")
+	}
+}
+
+func TestParseChatCompletionRequestToIRMultipleImagesAndDataURL(t *testing.T) {
+	t.Parallel()
+
+	dataURL := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
+	req, err := ParseChatCompletionRequest([]byte(`{
+		"model": "vision-model",
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "image_url", "image_url": {"url": "` + dataURL + `", "detail": "low"}},
+				{"type": "image_url", "image_url": {"url": "https://example.test/second.jpg"}}
+			]
+		}]
+	}`))
+	if err != nil {
+		t.Fatalf("ParseChatCompletionRequest: %v", err)
+	}
+	got, err := req.ToIR()
+	if err != nil {
+		t.Fatalf("ToIR: %v", err)
+	}
+
+	parts := got.Messages[0].Content
+	if len(parts) != 2 {
+		t.Fatalf("content parts length = %d, want 2", len(parts))
+	}
+	if parts[0].ImageURL != dataURL || parts[0].Detail != "low" {
+		t.Fatalf("first image part = %#v", parts[0])
+	}
+	if parts[1].ImageURL != "https://example.test/second.jpg" || parts[1].Detail != "" {
+		t.Fatalf("second image part = %#v", parts[1])
+	}
+}
+
+func TestParseChatCompletionRequestRejectsMalformedContentParts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "content object", body: `{"model":"coding","messages":[{"role":"user","content":{"type":"text","text":"hello"}}]}`},
+		{name: "missing type", body: `{"model":"coding","messages":[{"role":"user","content":[{"text":"hello"}]}]}`},
+		{name: "unknown type", body: `{"model":"coding","messages":[{"role":"user","content":[{"type":"input_image","image_url":{"url":"https://example.test/a.png"}}]}]}`},
+		{name: "missing text", body: `{"model":"coding","messages":[{"role":"user","content":[{"type":"text"}]}]}`},
+		{name: "image url string", body: `{"model":"coding","messages":[{"role":"user","content":[{"type":"image_url","image_url":"https://example.test/a.png"}]}]}`},
+		{name: "missing image url", body: `{"model":"coding","messages":[{"role":"user","content":[{"type":"image_url","image_url":{}}]}]}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := ParseChatCompletionRequest([]byte(tt.body)); err == nil {
+				t.Fatal("ParseChatCompletionRequest returned nil error, want malformed content error")
+			}
+		})
+	}
+}
+
+func TestChatCompletionRequestFromIRImageParts(t *testing.T) {
+	t.Parallel()
+
+	req, err := ChatCompletionRequestFromIR(ir.Request{
+		Model: "vision-model",
+		Messages: []ir.Message{{
+			Role: ir.RoleUser,
+			Content: []ir.ContentPart{
+				{Type: ir.ContentTypeText, Text: "describe"},
+				{Type: ir.ContentTypeImageURL, ImageURL: "data:image/jpeg;base64,/9j/4AAQ", Detail: "auto"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletionRequestFromIR: %v", err)
+	}
+
+	encoded, err := json.Marshal(req.Messages[0].Content)
+	if err != nil {
+		t.Fatalf("Marshal content: %v", err)
+	}
+	var parts []ChatContentPart
+	if err := json.Unmarshal(encoded, &parts); err != nil {
+		t.Fatalf("Unmarshal content: %v", err)
+	}
+	if len(parts) != 2 || parts[0].Text != "describe" || parts[1].ImageURL == nil || parts[1].ImageURL.Detail != "auto" {
+		t.Fatalf("encoded parts = %#v", parts)
 	}
 }
 

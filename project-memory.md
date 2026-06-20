@@ -120,3 +120,10 @@
 - Decision: use `X-Request-ID` as the public correlation header, preserve incoming IDs only when they are short printable token-like values without whitespace or obvious secret patterns, generate `req_<128-bit hex>` IDs with `crypto/rand` otherwise, store the ID in request context, copy it into IR `ID` and `metadata.request_id`, and return it on all server responses via the response header. Error responses rely on the header rather than extending the OpenAI-compatible JSON error shape.
 - Rejected alternatives: adding a non-standard `request_id` field to OpenAI error bodies, because clients may expect the strict error envelope; trusting arbitrary incoming header values, because unsafe values could leak secrets or control characters back to logs/headers.
 - Affected area: API server middleware, chat handlers, request logging, router/provider call context, and future operational tracing.
+
+### Chat image content part parsing scope
+
+- Context: `openai.chat-image-parts` needed Chat Completions `image_url` content arrays, but image fetching/validation, Responses `input_image`, and transcript logging are later work.
+- Decision: accept simple string content as before and accept content arrays containing only `text` and `image_url` parts. Require the OpenAI-shaped nested `image_url.url` string while otherwise accepting both ordinary URLs and data URLs without fetch/URL validation; preserve optional `detail` into IR. When converting IR back to OpenAI Chat requests, keep all-text messages as a string and emit multimodal arrays only when image parts are present.
+- Rejected alternatives: validating URL schemes/base64 payloads now, because the task only needs request-shape validation; accepting `input_image` in Chat Completions, because that belongs to Responses/future adapters.
+- Affected area: OpenAI edge parsing, IR normalization, OpenAI-compatible provider request serialization, future modality filtering and image redaction tasks.
