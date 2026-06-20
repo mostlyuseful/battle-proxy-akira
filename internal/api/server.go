@@ -5,10 +5,50 @@ import (
 	"net/http"
 )
 
+// Middleware wraps an HTTP handler. Client authentication can be supplied this way.
+type Middleware func(http.Handler) http.Handler
+
+// Option configures the API server.
+type Option func(*serverOptions)
+
+type serverOptions struct {
+	modelLister ModelLister
+	clientAuth  Middleware
+}
+
+// WithModelLister configures the source used by GET /v1/models.
+func WithModelLister(lister ModelLister) Option {
+	return func(opts *serverOptions) {
+		opts.modelLister = lister
+	}
+}
+
+// WithClientAuth configures middleware applied to client API routes.
+func WithClientAuth(middleware Middleware) Option {
+	return func(opts *serverOptions) {
+		opts.clientAuth = middleware
+	}
+}
+
 // NewServer builds the HTTP handler tree for the proxy API.
-func NewServer() http.Handler {
+func NewServer(options ...Option) http.Handler {
+	opts := serverOptions{
+		modelLister: ModelListerFunc(emptyModels),
+		clientAuth:  identityMiddleware,
+	}
+	for _, option := range options {
+		option(&opts)
+	}
+	if opts.modelLister == nil {
+		opts.modelLister = ModelListerFunc(emptyModels)
+	}
+	if opts.clientAuth == nil {
+		opts.clientAuth = identityMiddleware
+	}
+
 	mux := http.NewServeMux()
 	RegisterHealthRoutes(mux)
+	RegisterModelRoutes(mux, opts.modelLister, opts.clientAuth)
 	return mux
 }
 

@@ -71,3 +71,10 @@
 - Decision: `Stream` sends the same Chat Completions request path as `Complete` with `stream=true` and `Accept: text/event-stream`, validates non-2xx responses before returning the channel, then reads SSE incrementally in a goroutine. Each upstream `data:` payload becomes an `ir.Event` with `Type=message_delta`, `Text` set to the raw payload, and `Raw` set to the raw JSON bytes; `[DONE]` becomes `Type=done`. Context cancellation uses `http.NewRequestWithContext` and closes the stream goroutine without emitting a synthetic error event.
 - Rejected alternatives: decoding OpenAI stream chunk JSON into structured deltas now, because the API layer can still pass through raw payloads and provider-specific event translation is out of scope; returning upstream error bodies on pre-stream status errors, because they may contain sensitive provider details.
 - Affected area: streaming provider, API streaming handler, retry-before-first-token logic, and future stream translation/error handling.
+
+### Models endpoint shape and auth hook
+
+- Context: `api.models` needed an OpenAI-compatible `/v1/models` endpoint and consistent client auth, but the client-auth task is not implemented yet and the spec does not define model `owned_by` values.
+- Decision: expose a small `ModelLister` interface consumed by the API layer, register `/v1/models` in `NewServer`, and apply an optional `Middleware` hook to client API routes so the later client-auth task can plug in consistently. Return `{object:"list", data:[...]}` with each model as `{id, object:"model", created:0, owned_by}`; direct models use their provider name as `owned_by`, synthetic/unknown-owner models use `proxy`.
+- Rejected alternatives: hard-wiring the router concrete type into API handlers, because a small interface is easier to test and replace; blocking this endpoint on the future client-auth implementation, because the middleware hook preserves the integration point without expanding scope.
+- Affected area: `/v1/models`, server construction options, future client-auth middleware, and API/router integration.
