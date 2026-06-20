@@ -42,7 +42,7 @@ func TestLoadValidConfig(t *testing.T) {
 		},
 		"client_auth": {
 			"mode": "static_bearer",
-			"tokens_env": "LLM_PROXY_CLIENT_TOKENS"
+			"tokens_val": "local-dev-token"
 		},
 		"providers": {
 			"openai_api": {
@@ -227,6 +227,25 @@ func TestLoadAcceptsBearerValueAndInvasiveLogging(t *testing.T) {
 	}
 	if cfg.Logging.Mode != LoggingModeInvasive {
 		t.Fatalf("logging mode = %q, want %q", cfg.Logging.Mode, LoggingModeInvasive)
+	}
+}
+
+func TestLoadAcceptsStaticBearerTokensVal(t *testing.T) {
+	t.Parallel()
+
+	path := writeTempConfig(t, `{
+		"client_auth": {
+			"mode": "static_bearer",
+			"tokens_val": "local-dev-token"
+		}
+	}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load static bearer tokens_val: %v", err)
+	}
+	if cfg.ClientAuth.TokensVal != "local-dev-token" {
+		t.Fatalf("ClientAuth.TokensVal = %q", cfg.ClientAuth.TokensVal)
 	}
 }
 

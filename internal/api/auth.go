@@ -19,7 +19,16 @@ func NewClientAuthMiddleware(cfg config.ClientAuthConfig) (Middleware, error) {
 	switch mode {
 	case config.ClientAuthModeNone:
 		return identityMiddleware, nil
-	case config.ClientAuthModeStaticBearer, config.ClientAuthModeBearerTokens:
+	case config.ClientAuthModeStaticBearer:
+		tokens := parseBearerTokens(cfg.TokensVal)
+		if len(tokens) == 0 {
+			tokens = parseBearerTokens(os.Getenv(cfg.TokensEnv))
+		}
+		if len(tokens) == 0 {
+			return nil, NewProxyError(ErrorInvalidRequest, "client bearer auth token is not configured", "client_auth")
+		}
+		return StaticBearerAuth(tokens), nil
+	case config.ClientAuthModeBearerTokens:
 		tokens := parseBearerTokens(os.Getenv(cfg.TokensEnv))
 		if len(tokens) == 0 {
 			return nil, NewProxyError(ErrorInvalidRequest, "client bearer auth token environment variable is unset or empty", "client_auth.tokens_env")

@@ -86,11 +86,12 @@ Authenticates incoming client requests.
 |-------------|--------|----------------------------|-----------------------------------------|
 | `mode`      | string | always (defaults to `none`)| `none`, `static_bearer`, `bearer_tokens` |
 | `tokens_env`| string | for bearer modes           | Env var name holding allowed token(s). |
+| `tokens_val`| string | optional for `static_bearer` | Hardcoded client bearer token(s). |
 
 Modes:
 
 - `none` — no client auth.
-- `static_bearer` — accepts a single bearer token from the env var.
+- `static_bearer` — accepts token(s) from `tokens_val`, or falls back to the env var.
 - `bearer_tokens` — accepts any token from a comma/newline-separated list in the env var.
 
 Example:
@@ -99,7 +100,7 @@ Example:
 {
   "client_auth": {
     "mode": "static_bearer",
-    "tokens_env": "LLM_PROXY_CLIENT_TOKENS"
+    "tokens_val": "local-dev-token"
   }
 }
 ```

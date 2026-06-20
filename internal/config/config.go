@@ -72,6 +72,7 @@ type ServerConfig struct {
 type ClientAuthConfig struct {
 	Mode      string `json:"mode"`
 	TokensEnv string `json:"tokens_env"`
+	TokensVal string `json:"tokens_val"`
 }
 
 // ProviderConfig describes one upstream provider.
@@ -229,9 +230,13 @@ func (c Config) Validate() error {
 	}
 	switch mode {
 	case ClientAuthModeNone:
-	case ClientAuthModeStaticBearer, ClientAuthModeBearerTokens:
+	case ClientAuthModeStaticBearer:
+		if c.ClientAuth.TokensEnv == "" && strings.TrimSpace(c.ClientAuth.TokensVal) == "" {
+			problems = append(problems, "client_auth.tokens_env or client_auth.tokens_val is required for static_bearer client auth")
+		}
+	case ClientAuthModeBearerTokens:
 		if c.ClientAuth.TokensEnv == "" {
-			problems = append(problems, "client_auth.tokens_env is required for bearer client auth")
+			problems = append(problems, "client_auth.tokens_env is required for bearer_tokens client auth")
 		}
 	default:
 		problems = append(problems, "client_auth.mode must be one of: none, static_bearer, bearer_tokens")

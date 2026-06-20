@@ -116,6 +116,41 @@ func TestNewClientAuthMiddlewareReadsStaticBearerTokensFromEnv(t *testing.T) {
 	}
 }
 
+func TestNewClientAuthMiddlewareReadsStaticBearerTokensFromConfigValue(t *testing.T) {
+	t.Parallel()
+
+	middleware, err := NewClientAuthMiddleware(config.ClientAuthConfig{
+		Mode:      config.ClientAuthModeStaticBearer,
+		TokensVal: "first-token",
+	})
+	if err != nil {
+		t.Fatalf("NewClientAuthMiddleware: %v", err)
+	}
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer first-token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+}
+
+func TestNewClientAuthMiddlewareRejectsMissingStaticBearerConfig(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewClientAuthMiddleware(config.ClientAuthConfig{
+		Mode: config.ClientAuthModeStaticBearer,
+	})
+	if err == nil {
+		t.Fatal("NewClientAuthMiddleware returned nil error, want config error")
+	}
+}
+
 func TestNewClientAuthMiddlewareRejectsEmptyTokenEnvWithoutLeakingValues(t *testing.T) {
 	t.Setenv("LLM_PROXY_CLIENT_TOKENS", " , ")
 
