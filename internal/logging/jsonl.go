@@ -22,6 +22,8 @@ type Logger interface {
 type RequestLogRecord struct {
 	Timestamp        time.Time            `json:"ts"`
 	RequestID        string               `json:"request_id"`
+	SessionID        string               `json:"session_id,omitempty"`
+	Endpoint         string               `json:"endpoint,omitempty"`
 	RequestedModel   string               `json:"requested_model"`
 	ResolvedProvider string               `json:"resolved_provider"`
 	ResolvedModel    string               `json:"resolved_model"`
@@ -30,7 +32,7 @@ type RequestLogRecord struct {
 	LatencyMS        int64                `json:"latency_ms"`
 	RetryCount       int                  `json:"retry_count"`
 	ImageInputs      []ImageInputMetadata `json:"image_inputs,omitempty"`
-	Transcript       any                  `json:"transcript"`
+	Transcript       any                  `json:"transcript,omitempty"`
 }
 
 // ImageInputMetadata is safe-to-log metadata for one image input.
@@ -57,26 +59,30 @@ func NewWithLogger(cfg config.LoggingConfig, logger *slog.Logger) (Logger, error
 			mode = config.LoggingModeOff
 		}
 	}
+	mode = canonicalMode(mode)
 	if !cfg.Enabled || mode == config.LoggingModeOff {
 		if logger != nil {
 			logger.Info("request logging disabled", "configured_mode", mode)
 		}
 		return NoopLogger{}, nil
 	}
-	if mode != config.LoggingModeMetadataOnly {
+	if mode != config.LoggingModeMetadataOnly && mode != config.LoggingModeInvasive {
 		return nil, fmt.Errorf("unsupported logging mode %q", mode)
 	}
 	if cfg.Path == "" {
-		return nil, fmt.Errorf("logging path is required for metadata_only mode")
+		return nil, fmt.Errorf("logging path is required for %s mode", mode)
 	}
 	if logger != nil {
-		logger.Info("metadata request logging configured", "path", cfg.Path)
+		logger.Info("request logging configured", "path", cfg.Path, "mode", mode)
 	}
-	return &JSONLLogger{path: cfg.Path, logger: logger}, nil
+	return &JSONLLogger{path: cfg.Path, mode: mode, logger: logger}, nil
 }
 
 // NoopLogger discards request records.
 type NoopLogger struct{}
+
+// Mode reports the effective logging mode.
+func (NoopLogger) Mode() string { return config.LoggingModeOff }
 
 // LogRequest implements Logger.
 func (NoopLogger) LogRequest(context.Context, RequestLogRecord) error { return nil }
@@ -84,11 +90,20 @@ func (NoopLogger) LogRequest(context.Context, RequestLogRecord) error { return n
 // JSONLLogger appends one JSON object per request to a local file.
 type JSONLLogger struct {
 	path   string
+	mode   string
 	mu     sync.Mutex
 	logger *slog.Logger
 }
 
-// LogRequest appends a metadata log record to the configured JSONL file.
+// Mode reports the effective logging mode.
+func (l *JSONLLogger) Mode() string {
+	if l == nil {
+		return config.LoggingModeOff
+	}
+	return canonicalMode(l.mode)
+}
+
+// LogRequest appends a log record to the configured JSONL file.
 func (l *JSONLLogger) LogRequest(ctx context.Context, rec RequestLogRecord) error {
 	if err := ctx.Err(); err != nil {
 		return err

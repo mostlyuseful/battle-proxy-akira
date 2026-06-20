@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,11 +28,8 @@ func RegisterResponsesRoutes(mux *http.ServeMux, responsesRouter router.Router, 
 		started := time.Now()
 		requestID := requestIDForRequest(r)
 		r = r.WithContext(ContextWithRequestID(r.Context(), requestID))
-		logRec := requestlog.RequestLogRecord{
-			Timestamp:  started.UTC(),
-			RequestID:  requestID,
-			RetryCount: 0,
-		}
+		logRec := newRequestLogRecord(r, "responses", requestID)
+		logRec.Timestamp = started.UTC()
 		if responsesRouter == nil {
 			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorNoAvailableModel, "no responses router configured", "model"))
 			return
@@ -41,6 +40,7 @@ func RegisterResponsesRoutes(mux *http.ServeMux, responsesRouter router.Router, 
 			writeLoggedOpenAIError(w, r, logger, logRec, started, proxyErrorFromReadBodyError(err))
 			return
 		}
+		attachRequestTranscript(logger, &logRec, body)
 		respReq, err := openaiapi.ParseResponseRequest(body)
 		if err != nil {
 			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorInvalidRequest, "invalid Responses request JSON", ""))
@@ -88,9 +88,13 @@ func completeResponsesRequest(w http.ResponseWriter, r *http.Request, responsesR
 		attemptLog.ResolvedProvider = candidate.ProviderName
 		attemptLog.ResolvedModel = candidate.ProviderModel
 		attemptLog.RetryCount = retryCount
+		transcriptAttempt := appendTranscriptAttempt(&attemptLog, candidate.ProviderName, candidate.ProviderModel)
 
 		providerResp, err := candidate.Provider.Complete(r.Context(), candidate.ProviderRequest(irReq))
 		if err != nil {
+			if transcriptAttempt != nil {
+				transcriptAttempt.Error = err.Error()
+			}
 			responsesRouter.MarkFailure(candidate, err)
 			if providerpkg.IsRetryable(err) && i+1 < len(candidates) {
 				retryCount++
@@ -100,6 +104,9 @@ func completeResponsesRequest(w http.ResponseWriter, r *http.Request, responsesR
 			return
 		}
 		responsesRouter.MarkSuccess(candidate)
+		if transcriptAttempt != nil {
+			transcriptAttempt.Response = append(json.RawMessage(nil), providerResp.RawBody...)
+		}
 
 		resp := candidate.RewriteResponse(*providerResp)
 		writeJSON(w, http.StatusOK, openaiapi.ResponseFromIR(resp, time.Now()))
@@ -118,9 +125,13 @@ candidateLoop:
 		attemptLog.ResolvedProvider = candidate.ProviderName
 		attemptLog.ResolvedModel = candidate.ProviderModel
 		attemptLog.RetryCount = retryCount
+		transcriptAttempt := appendTranscriptAttempt(&attemptLog, candidate.ProviderName, candidate.ProviderModel)
 
 		events, err := candidate.Provider.Stream(r.Context(), candidate.ProviderRequest(irReq))
 		if err != nil {
+			if transcriptAttempt != nil {
+				transcriptAttempt.Error = err.Error()
+			}
 			responsesRouter.MarkFailure(candidate, err)
 			if providerpkg.IsRetryable(err) && i+1 < len(candidates) {
 				retryCount++
@@ -136,8 +147,18 @@ candidateLoop:
 
 		emitted := false
 		for event := range events {
+			if transcriptAttempt != nil {
+				if len(event.Raw) > 0 {
+					transcriptAttempt.Stream = append(transcriptAttempt.Stream, append(json.RawMessage(nil), event.Raw...))
+				} else if event.Text != "" {
+					transcriptAttempt.Stream = append(transcriptAttempt.Stream, json.RawMessage(strconv.Quote(event.Text)))
+				}
+			}
 			if event.Type == ir.EventTypeError || event.Error != nil {
 				responsesRouter.MarkFailure(candidate, responsesStreamError(event))
+				if transcriptAttempt != nil {
+					transcriptAttempt.Error = responsesStreamError(event).Error()
+				}
 				if !emitted {
 					if isRetryableStreamEvent(event) && i+1 < len(candidates) {
 						retryCount++

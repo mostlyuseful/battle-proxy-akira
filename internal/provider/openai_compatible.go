@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 
 	"battle-proxy-akira/internal/auth"
 	"battle-proxy-akira/internal/config"
@@ -21,12 +22,14 @@ import (
 
 // OpenAICompatibleProvider calls an OpenAI-compatible upstream API using raw HTTP.
 type OpenAICompatibleProvider struct {
-	name        string
-	baseURL     *url.URL
-	tokenSource auth.TokenSource
-	httpClient  *http.Client
-	models      map[string]config.ModelConfig
-	logger      *slog.Logger
+	name             string
+	baseURL          *url.URL
+	tokenSource      auth.TokenSource
+	httpClient       *http.Client
+	models           map[string]config.ModelConfig
+	logger           *slog.Logger
+	discoveredModels []ir.Model
+	discoveredMu     sync.Mutex
 }
 
 // NewOpenAICompatible constructs an OpenAI-compatible provider adapter.
@@ -163,21 +166,33 @@ func (p *OpenAICompatibleProvider) Stream(ctx context.Context, req ir.Request) (
 	return events, nil
 }
 
-// Models returns models configured for this provider.
+// Models returns configured models, or discovers them from the upstream /models endpoint.
 func (p *OpenAICompatibleProvider) Models(ctx context.Context) ([]ir.Model, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	models := make([]ir.Model, 0, len(p.models))
-	for modelName, model := range p.models {
-		models = append(models, ir.Model{
-			ID:         modelName,
-			Provider:   p.name,
-			Name:       modelName,
-			Modalities: append([]string(nil), model.Modalities...),
-		})
+	if len(p.models) > 0 {
+		return configuredModels(p.name, p.models), nil
 	}
-	return models, nil
+
+	p.discoveredMu.Lock()
+	cached := cloneModels(p.discoveredModels)
+	p.discoveredMu.Unlock()
+	if len(cached) > 0 {
+		return cached, nil
+	}
+
+	models, err := p.fetchModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	p.discoveredMu.Lock()
+	if len(p.discoveredModels) == 0 {
+		p.discoveredModels = cloneModels(models)
+	}
+	cached = cloneModels(p.discoveredModels)
+	p.discoveredMu.Unlock()
+	return cached, nil
 }
 
 // Health returns nil for now if the provider is configured and the context is active.
@@ -231,6 +246,106 @@ func (p *OpenAICompatibleProvider) doChatCompletion(ctx context.Context, req ir.
 		p.logger.Info("upstream chat completion response received", "provider", p.name, "model", req.Model, "stream", stream, "status", httpResp.StatusCode)
 	}
 	return httpResp, nil
+}
+
+func (p *OpenAICompatibleProvider) fetchModels(ctx context.Context) ([]ir.Model, error) {
+	if p.logger != nil {
+		p.logger.Info("fetching upstream models", "provider", p.name, "endpoint", p.endpoint("models"))
+	}
+	token, err := p.tokenSource.Token(ctx)
+	if err != nil {
+		if p.logger != nil {
+			p.logger.Warn("upstream provider auth failed during model discovery", "provider", p.name, "error", err)
+		}
+		return nil, &Error{Code: ErrorProviderAuthFailed, Retryable: false, Provider: p.name}
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, p.endpoint("models"), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create upstream models request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Accept", "application/json")
+
+	httpResp, err := p.httpClient.Do(httpReq)
+	if err != nil {
+		if p.logger != nil {
+			p.logger.Warn("upstream models request failed", "provider", p.name, "error", err)
+		}
+		return nil, classifyNetworkError(p.name, err)
+	}
+	defer httpResp.Body.Close()
+
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read upstream models response: %w", err)
+	}
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		if p.logger != nil {
+			p.logger.Warn("upstream models returned non-2xx", "provider", p.name, "status", httpResp.StatusCode)
+		}
+		return nil, classifyHTTPStatus(p.name, httpResp.StatusCode, httpResp.Header, respBody)
+	}
+
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &payload); err != nil {
+		return nil, fmt.Errorf("decode upstream models response: %w", err)
+	}
+	models := make([]ir.Model, 0, len(payload.Data))
+	for _, model := range payload.Data {
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		models = append(models, ir.Model{ID: modelID, Provider: p.name, Name: modelID, Modalities: []string{ir.ModalityText}})
+	}
+	return models, nil
+}
+
+func configuredModels(providerName string, configured map[string]config.ModelConfig) []ir.Model {
+	models := make([]ir.Model, 0, len(configured))
+	for modelName, model := range configured {
+		models = append(models, ir.Model{
+			ID:         modelName,
+			Provider:   providerName,
+			Name:       modelName,
+			Modalities: append([]string(nil), model.Modalities...),
+		})
+	}
+	return models
+}
+
+func cloneModels(in []ir.Model) []ir.Model {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]ir.Model, 0, len(in))
+	for _, model := range in {
+		out = append(out, ir.Model{
+			ID:         model.ID,
+			Provider:   model.Provider,
+			Name:       model.Name,
+			Modalities: append([]string(nil), model.Modalities...),
+			Synthetic:  model.Synthetic,
+			Metadata:   cloneMetadata(model.Metadata),
+		})
+	}
+	return out
+}
+
+func cloneMetadata(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func (p *OpenAICompatibleProvider) endpoint(suffix string) string {

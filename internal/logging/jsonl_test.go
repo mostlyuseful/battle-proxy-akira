@@ -152,6 +152,44 @@ func TestJSONLLoggerWritesImageMetadataWithoutRawDataURL(t *testing.T) {
 	}
 }
 
+func TestJSONLLoggerWritesInvasiveTranscriptAndRedactsSecrets(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "requests.jsonl")
+	logger, err := New(config.LoggingConfig{Enabled: true, Mode: config.LoggingModeInvasive, Path: path})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	transcript := &Transcript{
+		Request:  json.RawMessage(`{"authorization":"Bearer client-secret-token","prompt":"use sk-upstream-secret-token"}`),
+		Attempts: []TranscriptAttempt{{Provider: "openai_api", Model: "gpt-test", Response: json.RawMessage(`{"output":"Bearer another-secret"}`)}},
+	}
+	if err := logger.LogRequest(context.Background(), RequestLogRecord{
+		Timestamp:  time.Unix(123, 0).UTC(),
+		RequestID:  "req_test",
+		SessionID:  "sess_123",
+		Endpoint:   "chat_completions",
+		Status:     200,
+		Transcript: transcript,
+	}); err != nil {
+		t.Fatalf("LogRequest: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	for _, secret := range []string{"client-secret-token", "sk-upstream-secret-token", "another-secret"} {
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("log output leaked %q in %s", secret, data)
+		}
+	}
+	if !strings.Contains(string(data), "session_id") || !strings.Contains(string(data), "transcript") {
+		t.Fatalf("log output missing session or transcript: %s", data)
+	}
+}
+
 func TestJSONLLoggerRedactsSecretLikeMetadata(t *testing.T) {
 	t.Parallel()
 

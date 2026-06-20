@@ -94,6 +94,32 @@ func TestBearerEnvTokenSourceErrorsDoNotLeakTokenValues(t *testing.T) {
 	}
 }
 
+func TestStaticBearerTokenSourceReturnsToken(t *testing.T) {
+	t.Parallel()
+
+	source, err := NewStaticBearerTokenSource("  sk-inline-secret  ")
+	if err != nil {
+		t.Fatalf("NewStaticBearerTokenSource: %v", err)
+	}
+
+	token, err := source.Token(context.Background())
+	if err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	if token != "sk-inline-secret" {
+		t.Fatalf("token = %q, want sk-inline-secret", token)
+	}
+}
+
+func TestStaticBearerTokenSourceRejectsEmptyValue(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewStaticBearerTokenSource("   ")
+	if !errors.Is(err, ErrMissingToken) {
+		t.Fatalf("NewStaticBearerTokenSource error = %v, want ErrMissingToken", err)
+	}
+}
+
 func TestAccessTokenEnvSourceReturnsToken(t *testing.T) {
 	t.Parallel()
 

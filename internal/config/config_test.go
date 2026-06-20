@@ -105,7 +105,6 @@ func TestValidateReportsMissingRequiredProviderFields(t *testing.T) {
 		"providers.broken.type is required",
 		"providers.broken.base_url is required",
 		"providers.broken.auth.type is required",
-		"providers.broken.models must contain at least one model",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("validation error %q missing %q", msg, want)
@@ -139,6 +138,28 @@ func TestValidateReportsInvalidSyntheticCandidateReference(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "synthetic_models.coding.candidates references unknown model") {
 		t.Fatalf("validation error = %q", err.Error())
+	}
+}
+
+func TestValidateAllowsDynamicProviderModelsForSyntheticCandidates(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Providers["openai_api"] = ProviderConfig{
+		Type:    ProviderTypeOpenAICompatible,
+		BaseURL: "https://api.openai.com/v1",
+		Auth: AuthConfig{
+			Type:  AuthTypeBearerValue,
+			Value: "sk-inline-secret",
+		},
+	}
+	cfg.SyntheticModels["coding"] = SyntheticModelConfig{
+		Strategy:   SyntheticStrategyFirstAvailable,
+		Candidates: []string{"openai_api:gpt-dynamic"},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate dynamic models: %v", err)
 	}
 }
 
@@ -176,6 +197,36 @@ func TestValidationErrorsDoNotLeakSecretLikeValues(t *testing.T) {
 		if strings.Contains(msg, secret) {
 			t.Fatalf("validation error leaked %q in %q", secret, msg)
 		}
+	}
+}
+
+func TestLoadAcceptsBearerValueAndInvasiveLogging(t *testing.T) {
+	t.Parallel()
+
+	path := writeTempConfig(t, `{
+		"providers": {
+			"inline": {
+				"type": "openai_compatible",
+				"base_url": "https://example.invalid/v1",
+				"auth": { "type": "bearer_val", "value": "sk-inline-secret" }
+			}
+		},
+		"logging": {
+			"enabled": true,
+			"mode": "invasive",
+			"path": "./proxy.jsonl"
+		}
+	}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load bearer_val config: %v", err)
+	}
+	if cfg.Providers["inline"].Auth.Type != AuthTypeBearerValue || cfg.Providers["inline"].Auth.Value != "sk-inline-secret" {
+		t.Fatalf("inline auth = %#v", cfg.Providers["inline"].Auth)
+	}
+	if cfg.Logging.Mode != LoggingModeInvasive {
+		t.Fatalf("logging mode = %q, want %q", cfg.Logging.Mode, LoggingModeInvasive)
 	}
 }
 

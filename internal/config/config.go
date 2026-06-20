@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,6 +31,7 @@ const (
 
 const (
 	AuthTypeBearerEnv          = "bearer_env"
+	AuthTypeBearerValue        = "bearer_val"
 	AuthTypeEnvAccessToken     = "env_access_token"
 	AuthTypeFileAccessToken    = "file_access_token"
 	AuthTypeCommandAccessToken = "access_token_command"
@@ -43,6 +45,7 @@ const (
 const (
 	LoggingModeOff                      = "off"
 	LoggingModeMetadataOnly             = "metadata_only"
+	LoggingModeInvasive                 = "invasive"
 	LoggingModeFullTranscript           = "full_transcript"
 	LoggingModeFullTranscriptPerRequest = "full_transcript_per_request"
 )
@@ -83,6 +86,7 @@ type ProviderConfig struct {
 type AuthConfig struct {
 	Type                 string   `json:"type"`
 	Env                  string   `json:"env,omitempty"`
+	Value                string   `json:"value,omitempty"`
 	File                 string   `json:"file,omitempty"`
 	Command              []string `json:"command,omitempty"`
 	RefreshBeforeSeconds int      `json:"refresh_before_seconds,omitempty"`
@@ -137,13 +141,13 @@ func Load(path string) (*Config, error) {
 		return &cfg, cfg.Validate()
 	}
 
-	f, err := os.Open(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("open config: %w", err)
 	}
-	defer f.Close()
+	raw = stripJSONComments(raw)
 
-	dec := json.NewDecoder(f)
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("decode config JSON: %w", err)
@@ -249,9 +253,6 @@ func (c Config) Validate() error {
 			problems = append(problems, path+".base_url must be an absolute http(s) URL")
 		}
 		problems = append(problems, validateProviderAuth(path+".auth", provider.Auth)...)
-		if len(provider.Models) == 0 {
-			problems = append(problems, path+".models must contain at least one model")
-		}
 		for modelName, model := range provider.Models {
 			modelPath := path + ".models." + modelName
 			if strings.TrimSpace(modelName) == "" {
@@ -287,18 +288,21 @@ func (c Config) Validate() error {
 				problems = append(problems, path+".candidates contains invalid provider:model reference "+candidate)
 				continue
 			}
-			if _, ok := c.Providers[providerName]; !ok {
+			providerCfg, ok := c.Providers[providerName]
+			if !ok {
 				problems = append(problems, path+".candidates references unknown provider "+providerName)
-			} else if _, ok := c.Providers[providerName].Models[providerModel]; !ok {
-				problems = append(problems, path+".candidates references unknown model "+providerModel+" for provider "+providerName)
+			} else if len(providerCfg.Models) > 0 {
+				if _, ok := providerCfg.Models[providerModel]; !ok {
+					problems = append(problems, path+".candidates references unknown model "+providerModel+" for provider "+providerName)
+				}
 			}
 		}
 	}
 
 	switch c.Logging.Mode {
-	case "", LoggingModeOff, LoggingModeMetadataOnly:
+	case "", LoggingModeOff, LoggingModeMetadataOnly, LoggingModeInvasive, LoggingModeFullTranscript, LoggingModeFullTranscriptPerRequest:
 	default:
-		problems = append(problems, "logging.mode must be one of: off, metadata_only, full_transcript, full_transcript_per_request")
+		problems = append(problems, "logging.mode must be one of: off, metadata_only, invasive, full_transcript, full_transcript_per_request")
 	}
 	if c.Logging.Enabled && c.Logging.Mode == "" {
 		problems = append(problems, "logging.mode is required when logging is enabled")
@@ -332,6 +336,10 @@ func validateProviderAuth(path string, auth AuthConfig) []string {
 		if auth.Env == "" {
 			problems = append(problems, path+".env is required for bearer_env auth")
 		}
+	case AuthTypeBearerValue:
+		if strings.TrimSpace(auth.Value) == "" {
+			problems = append(problems, path+".value is required for bearer_val auth")
+		}
 	case AuthTypeEnvAccessToken:
 		if auth.Env == "" {
 			problems = append(problems, path+".env is required for env_access_token auth")
@@ -348,7 +356,7 @@ func validateProviderAuth(path string, auth AuthConfig) []string {
 			problems = append(problems, path+".refresh_before_seconds must be non-negative")
 		}
 	default:
-		problems = append(problems, path+".type must be one of: bearer_env, env_access_token, file_access_token, access_token_command")
+		problems = append(problems, path+".type must be one of: bearer_env, bearer_val, env_access_token, file_access_token, access_token_command")
 	}
 	return problems
 }

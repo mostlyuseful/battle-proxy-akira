@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -45,6 +47,28 @@ func validConfig(extraProvider string) *config.Config {
 
 // validConfigWithoutOpenAI removes the openai_api provider, used to test that
 // availability state for removed pairs is dropped on reload.
+func validDynamicConfig(baseURL string) *config.Config {
+	cfg := config.Default()
+	cfg.Providers = map[string]config.ProviderConfig{
+		"openai_api": {
+			Type:    config.ProviderTypeOpenAICompatible,
+			BaseURL: baseURL,
+			Auth:    config.AuthConfig{Type: config.AuthTypeBearerValue, Value: "sk-inline-secret"},
+		},
+	}
+	cfg.SyntheticModels = map[string]config.SyntheticModelConfig{
+		"coding": {
+			Strategy:   config.SyntheticStrategyFirstAvailable,
+			Expose:     true,
+			Candidates: []string{"openai_api:gpt-dynamic"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		panic(err)
+	}
+	return &cfg
+}
+
 func validConfigWithoutOpenAI() *config.Config {
 	cfg := config.Default()
 	cfg.Providers = map[string]config.ProviderConfig{
@@ -61,6 +85,44 @@ func validConfigWithoutOpenAI() *config.Config {
 		panic(err)
 	}
 	return &cfg
+}
+
+func TestManagerBuildDiscoversProviderModelsForRouting(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("path = %q, want /v1/models", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-inline-secret" {
+			t.Fatalf("authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-dynamic"}]}`))
+	}))
+	defer upstream.Close()
+
+	m, err := NewManager(func() (*config.Config, error) {
+		return validDynamicConfig(upstream.URL + "/v1"), nil
+	}, upstream.Client())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	models, err := m.Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+	if !containsModelID(models, "gpt-dynamic") || !containsModelID(models, "coding") {
+		t.Fatalf("models = %v, want discovered direct and synthetic models", modelIDs(models))
+	}
+	candidates, err := m.Resolve(context.Background(), ir.Request{Model: "coding"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ProviderModel != "gpt-dynamic" {
+		t.Fatalf("candidates = %#v", candidates)
+	}
 }
 
 func TestManagerReloadSuccessSwapsConfigAndProviders(t *testing.T) {

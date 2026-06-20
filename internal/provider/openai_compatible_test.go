@@ -426,6 +426,43 @@ func TestOpenAICompatibleProviderStreamPropagatesContextCancellation(t *testing.
 	}
 }
 
+func TestOpenAICompatibleProviderModelsReturnsDiscoveredModelsWhenUnconfigured(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("path = %q, want /v1/models", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("authorization = %q, want bearer token", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-dynamic"},{"id":"vision-dynamic"}]}`))
+	}))
+	defer upstream.Close()
+
+	provider, err := NewOpenAICompatible("openai_api", config.ProviderConfig{BaseURL: upstream.URL + "/v1"}, staticTokenSource("test-token"), upstream.Client())
+	if err != nil {
+		t.Fatalf("NewOpenAICompatible: %v", err)
+	}
+
+	models, err := provider.Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+	if len(models) != 2 || models[0].Provider != "openai_api" || len(models[0].Modalities) != 1 || models[0].Modalities[0] != ir.ModalityText {
+		t.Fatalf("models = %#v", models)
+	}
+	if _, err := provider.Models(context.Background()); err != nil {
+		t.Fatalf("Models cached: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("model discovery calls = %d, want 1", calls)
+	}
+}
+
 func TestOpenAICompatibleProviderModelsReturnsConfiguredModels(t *testing.T) {
 	t.Parallel()
 

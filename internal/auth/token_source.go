@@ -37,6 +37,12 @@ type BearerEnvTokenSource struct {
 	logger *slog.Logger
 }
 
+// StaticBearerTokenSource returns a fixed configured bearer token.
+type StaticBearerTokenSource struct {
+	token  string
+	logger *slog.Logger
+}
+
 // AccessTokenEnvSource reads an OAuth/access-token style bearer token from an environment variable.
 type AccessTokenEnvSource struct {
 	env    string
@@ -82,6 +88,23 @@ func NewBearerEnvTokenSourceWithLogger(env string, logger *slog.Logger) (*Bearer
 		logger.Info("bearer_env token source configured", "env", env)
 	}
 	return &BearerEnvTokenSource{env: env, lookup: os.LookupEnv, logger: logger}, nil
+}
+
+// NewStaticBearerTokenSource creates a token source for bearer_val provider auth.
+func NewStaticBearerTokenSource(token string) (*StaticBearerTokenSource, error) {
+	return NewStaticBearerTokenSourceWithLogger(token, nil)
+}
+
+// NewStaticBearerTokenSourceWithLogger creates a token source with optional verbose diagnostics.
+func NewStaticBearerTokenSourceWithLogger(token string, logger *slog.Logger) (*StaticBearerTokenSource, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, fmt.Errorf("bearer_val auth requires value: %w", ErrMissingToken)
+	}
+	if logger != nil {
+		logger.Info("bearer_val token source configured")
+	}
+	return &StaticBearerTokenSource{token: token, logger: logger}, nil
 }
 
 // NewAccessTokenEnvSource creates a token source for env_access_token provider auth.
@@ -153,6 +176,8 @@ func NewTokenSourceWithLogger(auth config.AuthConfig, logger *slog.Logger) (Toke
 	switch auth.Type {
 	case config.AuthTypeBearerEnv:
 		return NewBearerEnvTokenSourceWithLogger(auth.Env, logger)
+	case config.AuthTypeBearerValue:
+		return NewStaticBearerTokenSourceWithLogger(auth.Value, logger)
 	case config.AuthTypeEnvAccessToken:
 		return NewAccessTokenEnvSourceWithLogger(auth.Env, logger)
 	case config.AuthTypeFileAccessToken:
@@ -176,6 +201,17 @@ func (s *BearerEnvTokenSource) Token(ctx context.Context) (string, error) {
 		s.logger.Info("reading provider token from environment", "env", s.env)
 	}
 	return tokenFromEnv(s.env, s.lookup, "provider token")
+}
+
+// Token returns the configured static bearer token.
+func (s *StaticBearerTokenSource) Token(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if s == nil || s.token == "" {
+		return "", fmt.Errorf("bearer_val token source is not configured: %w", ErrMissingToken)
+	}
+	return s.token, nil
 }
 
 // Token returns the current access token from an environment variable.

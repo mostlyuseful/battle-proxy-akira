@@ -381,6 +381,47 @@ func TestChatCompletionsLogsImageMetadata(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsInvasiveLoggingCapturesSessionAndTranscript(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "upstream-token")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id": "chatcmpl-upstream",
+			"object": "chat.completion",
+			"created": 123,
+			"model": "gpt-test",
+			"choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]
+		}`))
+	}))
+	defer upstream.Close()
+
+	logger := &recordingLogger{mode: config.LoggingModeInvasive}
+	handler := NewServer(
+		WithChatRouter(newTestChatRouter(t, upstream.URL)),
+		WithRequestLogger(logger),
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","messages":[{"role":"user","content":"hello sk-secret-token"}]}`))
+	req.Header.Set(sessionIDHeader, "sess_123")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if len(logger.records) != 1 {
+		t.Fatalf("log records length = %d, want 1", len(logger.records))
+	}
+	got := logger.records[0]
+	if got.SessionID != "sess_123" {
+		t.Fatalf("session_id = %q, want sess_123", got.SessionID)
+	}
+	transcript, ok := got.Transcript.(*requestlog.Transcript)
+	if !ok || transcript == nil || len(transcript.Attempts) != 1 || len(transcript.Request) == 0 || len(transcript.Attempts[0].Response) == 0 {
+		t.Fatalf("transcript = %#v", got.Transcript)
+	}
+}
+
 func TestChatCompletionsLoggingFailureDoesNotBreakSuccess(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "upstream-token")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -439,6 +480,14 @@ func TestChatCompletionsAppliesClientAuth(t *testing.T) {
 
 type recordingLogger struct {
 	records []requestlog.RequestLogRecord
+	mode    string
+}
+
+func (l *recordingLogger) Mode() string {
+	if l == nil || l.mode == "" {
+		return config.LoggingModeMetadataOnly
+	}
+	return l.mode
 }
 
 func (l *recordingLogger) LogRequest(ctx context.Context, rec requestlog.RequestLogRecord) error {

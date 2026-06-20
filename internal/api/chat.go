@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"battle-proxy-akira/internal/ir"
@@ -28,11 +29,8 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 		started := time.Now()
 		requestID := requestIDForRequest(r)
 		r = r.WithContext(ContextWithRequestID(r.Context(), requestID))
-		logRec := requestlog.RequestLogRecord{
-			Timestamp:  started.UTC(),
-			RequestID:  requestID,
-			RetryCount: 0,
-		}
+		logRec := newRequestLogRecord(r, "chat_completions", requestID)
+		logRec.Timestamp = started.UTC()
 		if chatRouter == nil {
 			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorNoAvailableModel, "no chat completion router configured", "model"))
 			return
@@ -43,6 +41,7 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 			writeLoggedOpenAIError(w, r, logger, logRec, started, proxyErrorFromReadBodyError(err))
 			return
 		}
+		attachRequestTranscript(logger, &logRec, body)
 		chatReq, err := openaiapi.ParseChatCompletionRequest(body)
 		if err != nil {
 			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorInvalidRequest, "invalid Chat Completions request JSON", ""))
@@ -88,9 +87,13 @@ func completeChatCompletion(w http.ResponseWriter, r *http.Request, chatRouter r
 		attemptLog.ResolvedProvider = candidate.ProviderName
 		attemptLog.ResolvedModel = candidate.ProviderModel
 		attemptLog.RetryCount = retryCount
+		transcriptAttempt := appendTranscriptAttempt(&attemptLog, candidate.ProviderName, candidate.ProviderModel)
 
 		providerResp, err := candidate.Provider.Complete(r.Context(), candidate.ProviderRequest(irReq))
 		if err != nil {
+			if transcriptAttempt != nil {
+				transcriptAttempt.Error = err.Error()
+			}
 			chatRouter.MarkFailure(candidate, err)
 			if providerpkg.IsRetryable(err) && i+1 < len(candidates) {
 				retryCount++
@@ -100,6 +103,9 @@ func completeChatCompletion(w http.ResponseWriter, r *http.Request, chatRouter r
 			return
 		}
 		chatRouter.MarkSuccess(candidate)
+		if transcriptAttempt != nil {
+			transcriptAttempt.Response = append(json.RawMessage(nil), providerResp.RawBody...)
+		}
 
 		resp := candidate.RewriteResponse(*providerResp)
 		writeJSON(w, http.StatusOK, openaiapi.ChatCompletionResponseFromIR(resp, time.Now()))
@@ -138,9 +144,13 @@ candidateLoop:
 		attemptLog.ResolvedProvider = candidate.ProviderName
 		attemptLog.ResolvedModel = candidate.ProviderModel
 		attemptLog.RetryCount = retryCount
+		transcriptAttempt := appendTranscriptAttempt(&attemptLog, candidate.ProviderName, candidate.ProviderModel)
 
 		events, err := candidate.Provider.Stream(r.Context(), candidate.ProviderRequest(irReq))
 		if err != nil {
+			if transcriptAttempt != nil {
+				transcriptAttempt.Error = err.Error()
+			}
 			chatRouter.MarkFailure(candidate, err)
 			if providerpkg.IsRetryable(err) && i+1 < len(candidates) {
 				retryCount++
@@ -152,8 +162,18 @@ candidateLoop:
 
 		emitted := false
 		for event := range events {
+			if transcriptAttempt != nil {
+				if len(event.Raw) > 0 {
+					transcriptAttempt.Stream = append(transcriptAttempt.Stream, append(json.RawMessage(nil), event.Raw...))
+				} else if event.Text != "" {
+					transcriptAttempt.Stream = append(transcriptAttempt.Stream, json.RawMessage(strconv.Quote(event.Text)))
+				}
+			}
 			if event.Type == ir.EventTypeError || event.Error != nil {
 				err := errors.New("upstream provider stream interrupted")
+				if transcriptAttempt != nil {
+					transcriptAttempt.Error = err.Error()
+				}
 				chatRouter.MarkFailure(candidate, err)
 				if !emitted {
 					if isRetryableStreamEvent(event) && i+1 < len(candidates) {
