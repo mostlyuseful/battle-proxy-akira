@@ -73,7 +73,7 @@ func NewServer(options ...Option) http.Handler {
 	RegisterHealthRoutes(mux)
 	RegisterModelRoutes(mux, opts.modelLister, opts.clientAuth)
 	RegisterChatRoutes(mux, opts.chatRouter, opts.clientAuth, opts.requestLogger)
-	return mux
+	return requestIDMiddleware(mux)
 }
 
 // RegisterHealthRoutes wires the base health and readiness endpoints.

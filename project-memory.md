@@ -113,3 +113,10 @@
 - Decision: keep metadata records header/body-free and add baseline string/record redaction for common bearer-token and `sk-...` API-key patterns before JSONL serialization. API/provider error paths continue returning generic upstream messages/status codes without upstream bodies. Tests search combined response/log output for sentinel client bearer tokens and upstream API keys on representative failure paths.
 - Rejected alternatives: deep transcript redaction now, because transcript logging is not implemented and has dedicated future work; trying to redact every possible secret format, because baseline helpers should cover current bearer/API-key risks without overfitting.
 - Affected area: metadata JSONL logging, provider/API error handling, future structured logging and redaction hardening.
+
+### Request ID propagation defaults
+
+- Context: `api.request-ids` needed generated/preserved request IDs in handlers, logs, router/provider context, and error correlation, but did not mandate a header name or exact error-body shape.
+- Decision: use `X-Request-ID` as the public correlation header, preserve incoming IDs only when they are short printable token-like values without whitespace or obvious secret patterns, generate `req_<128-bit hex>` IDs with `crypto/rand` otherwise, store the ID in request context, copy it into IR `ID` and `metadata.request_id`, and return it on all server responses via the response header. Error responses rely on the header rather than extending the OpenAI-compatible JSON error shape.
+- Rejected alternatives: adding a non-standard `request_id` field to OpenAI error bodies, because clients may expect the strict error envelope; trusting arbitrary incoming header values, because unsafe values could leak secrets or control characters back to logs/headers.
+- Affected area: API server middleware, chat handlers, request logging, router/provider call context, and future operational tracing.

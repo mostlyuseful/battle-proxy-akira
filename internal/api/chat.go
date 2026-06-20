@@ -1,8 +1,6 @@
 package api
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -26,9 +24,11 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 
 	mux.Handle("POST /v1/chat/completions", clientAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
+		requestID := requestIDForRequest(r)
+		r = r.WithContext(ContextWithRequestID(r.Context(), requestID))
 		logRec := requestlog.RequestLogRecord{
 			Timestamp:  started.UTC(),
-			RequestID:  requestIDFromRequest(r),
+			RequestID:  requestID,
 			RetryCount: 0,
 		}
 		if chatRouter == nil {
@@ -53,6 +53,11 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorInvalidRequest, err.Error(), ""))
 			return
 		}
+		irReq.ID = requestID
+		if irReq.Metadata == nil {
+			irReq.Metadata = map[string]string{}
+		}
+		irReq.Metadata["request_id"] = requestID
 
 		candidates, err := chatRouter.Resolve(r.Context(), irReq)
 		if err != nil {
@@ -121,17 +126,6 @@ func writeLoggedOpenAIError(w http.ResponseWriter, r *http.Request, logger reque
 	rec.Status = proxyErr.StatusCode()
 	rec.LatencyMS = time.Since(started).Milliseconds()
 	_ = logger.LogRequest(r.Context(), rec)
-}
-
-func requestIDFromRequest(r *http.Request) string {
-	if id := r.Header.Get("X-Request-ID"); id != "" {
-		return id
-	}
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return ""
-	}
-	return "req_" + hex.EncodeToString(b[:])
 }
 
 func proxyErrorFromRouterError(err error) *ProxyError {
