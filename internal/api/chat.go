@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -70,14 +71,14 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 			return
 		}
 
-		candidate := candidates[0]
-		logRec.ResolvedProvider = candidate.ProviderName
-		logRec.ResolvedModel = candidate.ProviderModel
 		if chatReq.Stream {
-			streamChatCompletion(w, r, chatRouter, candidate, irReq, logger, logRec, started)
+			streamChatCompletion(w, r, chatRouter, candidates, irReq, logger, logRec, started)
 			return
 		}
 
+		candidate := candidates[0]
+		logRec.ResolvedProvider = candidate.ProviderName
+		logRec.ResolvedModel = candidate.ProviderModel
 		providerResp, err := candidate.Provider.Complete(r.Context(), candidate.ProviderRequest(irReq))
 		if err != nil {
 			chatRouter.MarkFailure(candidate, err)
@@ -114,29 +115,88 @@ func proxyErrorFromReadBodyError(err error) *ProxyError {
 	return NewProxyError(ErrorInvalidRequest, "read request body failed", "")
 }
 
-func streamChatCompletion(w http.ResponseWriter, r *http.Request, chatRouter router.Router, candidate router.RouteCandidate, irReq ir.Request, logger requestlog.Logger, logRec requestlog.RequestLogRecord, started time.Time) {
-	events, err := candidate.Provider.Stream(r.Context(), candidate.ProviderRequest(irReq))
-	if err != nil {
-		chatRouter.MarkFailure(candidate, err)
-		writeLoggedOpenAIError(w, r, logger, logRec, started, proxyErrorFromProviderError(err, "upstream provider stream failed"))
-		return
-	}
+func streamChatCompletion(w http.ResponseWriter, r *http.Request, chatRouter router.Router, candidates []router.RouteCandidate, irReq ir.Request, logger requestlog.Logger, logRec requestlog.RequestLogRecord, started time.Time) {
+	retryCount := 0
+candidateLoop:
+	for i, candidate := range candidates {
+		attemptLog := logRec
+		attemptLog.ResolvedProvider = candidate.ProviderName
+		attemptLog.ResolvedModel = candidate.ProviderModel
+		attemptLog.RetryCount = retryCount
 
-	sse.SetHeaders(w.Header())
-	w.WriteHeader(http.StatusOK)
-	for event := range events {
-		if err := sse.WriteData(w, event.Text); err != nil {
+		events, err := candidate.Provider.Stream(r.Context(), candidate.ProviderRequest(irReq))
+		if err != nil {
 			chatRouter.MarkFailure(candidate, err)
-			logRec.Status = http.StatusOK
-			logRec.LatencyMS = time.Since(started).Milliseconds()
-			_ = logger.LogRequest(r.Context(), logRec)
+			if providerpkg.IsRetryable(err) && i+1 < len(candidates) {
+				retryCount++
+				continue
+			}
+			writeLoggedOpenAIError(w, r, logger, attemptLog, started, proxyErrorFromProviderError(err, "upstream provider stream failed"))
 			return
 		}
+
+		emitted := false
+		for event := range events {
+			if event.Type == ir.EventTypeError || event.Error != nil {
+				err := errors.New("upstream provider stream interrupted")
+				chatRouter.MarkFailure(candidate, err)
+				if !emitted {
+					if isRetryableStreamEvent(event) && i+1 < len(candidates) {
+						retryCount++
+						continue candidateLoop
+					}
+					writeLoggedOpenAIError(w, r, logger, attemptLog, started, NewProxyError(ErrorStreamInterrupted, "upstream provider stream interrupted", ""))
+					return
+				}
+				_ = writeStreamInterruptedEvent(w)
+				attemptLog.Status = http.StatusOK
+				attemptLog.LatencyMS = time.Since(started).Milliseconds()
+				_ = logger.LogRequest(r.Context(), attemptLog)
+				return
+			}
+			if !emitted {
+				sse.SetHeaders(w.Header())
+				w.WriteHeader(http.StatusOK)
+				emitted = true
+			}
+			if err := sse.WriteData(w, event.Text); err != nil {
+				chatRouter.MarkFailure(candidate, err)
+				attemptLog.Status = http.StatusOK
+				attemptLog.LatencyMS = time.Since(started).Milliseconds()
+				_ = logger.LogRequest(r.Context(), attemptLog)
+				return
+			}
+		}
+		if !emitted {
+			sse.SetHeaders(w.Header())
+			w.WriteHeader(http.StatusOK)
+		}
+		chatRouter.MarkSuccess(candidate)
+		attemptLog.Status = http.StatusOK
+		attemptLog.LatencyMS = time.Since(started).Milliseconds()
+		_ = logger.LogRequest(r.Context(), attemptLog)
+		return
 	}
-	chatRouter.MarkSuccess(candidate)
-	logRec.Status = http.StatusOK
-	logRec.LatencyMS = time.Since(started).Milliseconds()
-	_ = logger.LogRequest(r.Context(), logRec)
+}
+
+func isRetryableStreamEvent(event ir.Event) bool {
+	if event.Error == nil {
+		return false
+	}
+	switch event.Error.Code {
+	case providerpkg.ErrorProviderRateLimited, providerpkg.ErrorUpstream:
+		return true
+	default:
+		return false
+	}
+}
+
+func writeStreamInterruptedEvent(w http.ResponseWriter) error {
+	encoded, err := json.Marshal(OpenAIErrorResponse{Error: OpenAIError{Message: "upstream provider stream interrupted", Type: OpenAIErrorType(ErrorStreamInterrupted), Code: string(ErrorStreamInterrupted)}})
+	if err != nil {
+		return err
+	}
+	return sse.WriteData(w, string(encoded))
 }
 
 func writeLoggedOpenAIError(w http.ResponseWriter, r *http.Request, logger requestlog.Logger, rec requestlog.RequestLogRecord, started time.Time, proxyErr *ProxyError) {
