@@ -76,23 +76,37 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 			return
 		}
 
-		candidate := candidates[0]
-		logRec.ResolvedProvider = candidate.ProviderName
-		logRec.ResolvedModel = candidate.ProviderModel
+		completeChatCompletion(w, r, chatRouter, candidates, irReq, logger, logRec, started)
+	})))
+}
+
+func completeChatCompletion(w http.ResponseWriter, r *http.Request, chatRouter router.Router, candidates []router.RouteCandidate, irReq ir.Request, logger requestlog.Logger, logRec requestlog.RequestLogRecord, started time.Time) {
+	retryCount := 0
+	for i, candidate := range candidates {
+		attemptLog := logRec
+		attemptLog.ResolvedProvider = candidate.ProviderName
+		attemptLog.ResolvedModel = candidate.ProviderModel
+		attemptLog.RetryCount = retryCount
+
 		providerResp, err := candidate.Provider.Complete(r.Context(), candidate.ProviderRequest(irReq))
 		if err != nil {
 			chatRouter.MarkFailure(candidate, err)
-			writeLoggedOpenAIError(w, r, logger, logRec, started, proxyErrorFromProviderError(err, "upstream provider request failed"))
+			if providerpkg.IsRetryable(err) && i+1 < len(candidates) {
+				retryCount++
+				continue
+			}
+			writeLoggedOpenAIError(w, r, logger, attemptLog, started, proxyErrorFromProviderError(err, "upstream provider request failed"))
 			return
 		}
 		chatRouter.MarkSuccess(candidate)
 
 		resp := candidate.RewriteResponse(*providerResp)
 		writeJSON(w, http.StatusOK, openaiapi.ChatCompletionResponseFromIR(resp, time.Now()))
-		logRec.Status = http.StatusOK
-		logRec.LatencyMS = time.Since(started).Milliseconds()
-		_ = logger.LogRequest(r.Context(), logRec)
-	})))
+		attemptLog.Status = http.StatusOK
+		attemptLog.LatencyMS = time.Since(started).Milliseconds()
+		_ = logger.LogRequest(r.Context(), attemptLog)
+		return
+	}
 }
 
 func readLimitedBody(w http.ResponseWriter, r *http.Request, maxBodyBytes int64) ([]byte, error) {
