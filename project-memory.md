@@ -22,3 +22,10 @@
 - Decision: `config.Load("")` returns a local-development config that can boot health endpoints without providers, with client auth disabled, logging off, and server defaults from the spec. Explicit JSON is decoded strictly with unknown fields rejected, then validated.
 - Rejected alternatives: requiring providers for default config, because that would prevent a fresh checkout from booting health endpoints; silently ignoring unknown fields, because typo detection is more useful for operator-managed config.
 - Affected area: config loading/validation and future command-line startup behavior.
+
+### Core IR response and event shape
+
+- Context: `ir.core-types` defined Request/Message/ContentPart/SamplingParams in the spec, but Response, Event, Model, usage, and error details were under-specified.
+- Decision: keep the IR provider-neutral and minimal: non-streaming `Response` has one assistant `Message`, finish reason, optional usage, metadata, and raw body; streaming `Event` carries a generic type, optional delta/text, finish reason, usage, error, metadata, and raw JSON; `Model` carries ID/provider/name/modalities/synthetic metadata. Request also includes `Extra map[string]json.RawMessage` alongside `RawBody` for unknown provider-compatible fields.
+- Rejected alternatives: mirroring OpenAI Chat Completions choices/chunks directly in the IR, because that would leak edge API shape into provider interfaces and make future Responses/non-OpenAI adapters harder.
+- Affected area: provider interface implementations, OpenAI translation, routing modality checks, and logging metadata.
