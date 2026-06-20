@@ -13,6 +13,7 @@ import (
 	"battle-proxy-akira/internal/api"
 	"battle-proxy-akira/internal/config"
 	requestlog "battle-proxy-akira/internal/logging"
+	"battle-proxy-akira/internal/metrics"
 	"battle-proxy-akira/internal/runtime"
 )
 
@@ -35,6 +36,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	metricsCollector := metrics.NewCollector()
+
 	clientAuth, err := api.NewClientAuthMiddleware(cfg.ClientAuth)
 	if err != nil {
 		slog.Error("build client auth", "error", err)
@@ -52,6 +55,7 @@ func main() {
 		api.WithClientAuth(clientAuth),
 		api.WithRequestLogger(logger),
 		api.WithServerConfig(cfg.Server),
+		api.WithMetrics(metricsCollector),
 	)
 	server := newHTTPServer(cfg.Server, handler)
 

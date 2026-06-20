@@ -219,6 +219,7 @@ func writeLoggedOpenAIError(w http.ResponseWriter, r *http.Request, logger reque
 	if proxyErr == nil {
 		proxyErr = NewProxyError(ErrorUpstream, "internal proxy error", "")
 	}
+	recordErrorFromProxy(r.Context(), proxyErr.Code)
 	rec.Status = proxyErr.StatusCode()
 	rec.LatencyMS = time.Since(started).Milliseconds()
 	_ = logger.LogRequest(r.Context(), rec)

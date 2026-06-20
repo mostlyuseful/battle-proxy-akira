@@ -6,6 +6,7 @@ import (
 
 	"battle-proxy-akira/internal/config"
 	requestlog "battle-proxy-akira/internal/logging"
+	"battle-proxy-akira/internal/metrics"
 	"battle-proxy-akira/internal/router"
 )
 
@@ -22,6 +23,7 @@ type serverOptions struct {
 	clientAuth      Middleware
 	requestLogger   requestlog.Logger
 	maxBodyBytes    int64
+	metrics         *metrics.Collector
 }
 
 // WithModelLister configures the source used by GET /v1/models.
@@ -67,6 +69,15 @@ func WithServerConfig(cfg config.ServerConfig) Option {
 	}
 }
 
+// WithMetrics configures the runtime metrics collector. When set, the proxy
+// records request counts, error counts, and latency summaries and exposes them
+// at GET /metrics.
+func WithMetrics(collector *metrics.Collector) Option {
+	return func(opts *serverOptions) {
+		opts.metrics = collector
+	}
+}
+
 // NewServer builds the HTTP handler tree for the proxy API.
 func NewServer(options ...Option) http.Handler {
 	opts := serverOptions{
@@ -97,10 +108,15 @@ func NewServer(options ...Option) http.Handler {
 
 	mux := http.NewServeMux()
 	RegisterHealthRoutes(mux)
+	RegisterMetricsRoutes(mux, opts.metrics)
 	RegisterModelRoutes(mux, opts.modelLister, opts.clientAuth)
 	RegisterChatRoutes(mux, opts.chatRouter, opts.clientAuth, opts.requestLogger, opts.maxBodyBytes)
 	RegisterResponsesRoutes(mux, responsesRouter, opts.clientAuth, opts.requestLogger, opts.maxBodyBytes)
-	return requestIDMiddleware(mux)
+	handler := http.Handler(mux)
+	if opts.metrics != nil {
+		handler = metricsMiddleware(opts.metrics, handler)
+	}
+	return requestIDMiddleware(handler)
 }
 
 // RegisterHealthRoutes wires the base health and readiness endpoints.
