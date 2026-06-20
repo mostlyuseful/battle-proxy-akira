@@ -1,6 +1,7 @@
 package router
 
 import (
+	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -8,7 +9,10 @@ import (
 	providerpkg "battle-proxy-akira/internal/provider"
 )
 
-const defaultExhaustionWindow = 30 * time.Second
+const (
+	exhaustionBackoffBase = 30 * time.Second
+	exhaustionBackoffMax  = 5 * time.Minute
+)
 
 // AvailabilityState is an in-memory snapshot for one provider/model pair.
 type AvailabilityState struct {
@@ -62,15 +66,6 @@ func (t *AvailabilityTracker) MarkFailure(candidate RouteCandidate, err error) {
 	if code == "" {
 		code = providerpkg.ErrorUpstream
 	}
-	var exhaustedUntil *time.Time
-	if code == providerpkg.ErrorProviderRateLimited || code == providerpkg.ErrorProviderExhausted {
-		now := time.Now
-		if t.now != nil {
-			now = t.now
-		}
-		until := now().Add(defaultExhaustionWindow)
-		exhaustedUntil = &until
-	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -80,7 +75,7 @@ func (t *AvailabilityTracker) MarkFailure(candidate RouteCandidate, err error) {
 	state.Healthy = false
 	state.Failures++
 	state.LastErrorCode = code
-	state.ExhaustedUntil = exhaustedUntil
+	state.ExhaustedUntil = t.exhaustedUntil(code, state.Failures, err)
 	t.states[key] = state
 }
 
@@ -113,6 +108,41 @@ func (t *AvailabilityTracker) States() []AvailabilityState {
 		return states[i].Provider < states[j].Provider
 	})
 	return states
+}
+
+func (t *AvailabilityTracker) exhaustedUntil(code string, failures int, err error) *time.Time {
+	if code != providerpkg.ErrorProviderRateLimited && code != providerpkg.ErrorProviderExhausted {
+		return nil
+	}
+	var providerErr *providerpkg.Error
+	if errors.As(err, &providerErr) && providerErr.RetryAfter != nil {
+		until := *providerErr.RetryAfter
+		return &until
+	}
+	now := time.Now
+	if t.now != nil {
+		now = t.now
+	}
+	backoff := exponentialBackoff(failures)
+	until := now().Add(backoff)
+	return &until
+}
+
+func exponentialBackoff(failures int) time.Duration {
+	if failures <= 1 {
+		return exhaustionBackoffBase
+	}
+	backoff := exhaustionBackoffBase
+	for i := 1; i < failures; i++ {
+		if backoff >= exhaustionBackoffMax/2 {
+			return exhaustionBackoffMax
+		}
+		backoff *= 2
+	}
+	if backoff > exhaustionBackoffMax {
+		return exhaustionBackoffMax
+	}
+	return backoff
 }
 
 // IsAvailable reports whether a provider/model is not in an active exhaustion window.

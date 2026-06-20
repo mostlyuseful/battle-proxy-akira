@@ -197,6 +197,7 @@ func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.Synt
 
 	candidates := make([]RouteCandidate, 0, len(synthetic.Candidates))
 	missingProviders := 0
+	unavailableCandidates := 0
 	unsupportedModalities := 0
 	for _, candidate := range synthetic.Candidates {
 		providerName, providerModel, ok := strings.Cut(candidate, ":")
@@ -220,6 +221,10 @@ func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.Synt
 			missingProviders++
 			continue
 		}
+		if r.availability != nil && !r.availability.IsAvailable(providerName, providerModel, time.Now()) {
+			unavailableCandidates++
+			continue
+		}
 		candidates = append(candidates, RouteCandidate{
 			ProviderName:   providerName,
 			ProviderModel:  providerModel,
@@ -234,7 +239,7 @@ func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.Synt
 		if unsupportedModalities > 0 {
 			code = ErrorUnsupportedModality
 			message = fmt.Sprintf("synthetic model %q does not support requested modalities", alias)
-		} else if missingProviders > 0 {
+		} else if missingProviders > 0 || unavailableCandidates > 0 {
 			code = ErrorNoAvailableModel
 		}
 		return nil, &Error{Code: code, Message: message, Param: "model"}
@@ -259,6 +264,9 @@ func (r *StaticRouter) resolveProviderModel(providerName, providerModel, request
 	if !supportsModalities(modelCfg.Modalities, requiredModalities) {
 		return nil, &Error{Code: ErrorUnsupportedModality, Message: fmt.Sprintf("model %q for provider %q does not support requested modalities", providerModel, providerName), Param: "model"}
 	}
+	if r.availability != nil && !r.availability.IsAvailable(providerName, providerModel, time.Now()) {
+		return nil, &Error{Code: ErrorNoAvailableModel, Message: fmt.Sprintf("model %q for provider %q is temporarily unavailable", providerModel, providerName), Param: "model"}
+	}
 	return r.candidate(providerName, providerModel, requestedModel)
 }
 
@@ -266,6 +274,7 @@ func (r *StaticRouter) resolveDirectModel(model string, requiredModalities []str
 	providerNames := sortedProviderNames(r.cfg.Providers)
 	foundModel := false
 	unsupportedModalities := 0
+	unavailableCandidates := 0
 	for _, providerName := range providerNames {
 		providerCfg := r.cfg.Providers[providerName]
 		modelCfg, ok := providerCfg.Models[model]
@@ -277,10 +286,17 @@ func (r *StaticRouter) resolveDirectModel(model string, requiredModalities []str
 			unsupportedModalities++
 			continue
 		}
+		if r.availability != nil && !r.availability.IsAvailable(providerName, model, time.Now()) {
+			unavailableCandidates++
+			continue
+		}
 		return r.candidate(providerName, model, model)
 	}
 	if foundModel && unsupportedModalities > 0 {
 		return nil, &Error{Code: ErrorUnsupportedModality, Message: fmt.Sprintf("model %q does not support requested modalities", model), Param: "model"}
+	}
+	if foundModel && unavailableCandidates > 0 {
+		return nil, &Error{Code: ErrorNoAvailableModel, Message: fmt.Sprintf("model %q is temporarily unavailable", model), Param: "model"}
 	}
 	return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("unknown model %q", model), Param: "model"}
 }

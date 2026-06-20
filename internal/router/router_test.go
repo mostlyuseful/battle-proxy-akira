@@ -325,6 +325,74 @@ func TestRouteCandidateProviderRequestAndResponseRewrite(t *testing.T) {
 	}
 }
 
+func TestAvailabilityStateUsesRetryAfterForExhaustionWindow(t *testing.T) {
+	t.Parallel()
+
+	r := NewStatic(testConfig(), nil)
+	retryAfter := time.Date(2026, 6, 20, 12, 30, 0, 0, time.UTC)
+	candidate := RouteCandidate{ProviderName: "openai_api", ProviderModel: "gpt-5.2", RequestedModel: "coding"}
+	r.MarkFailure(candidate, &provider.Error{Code: provider.ErrorProviderRateLimited, Retryable: true, Provider: "openai_api", RetryAfter: &retryAfter})
+
+	state, ok := r.Availability("openai_api", "gpt-5.2")
+	if !ok {
+		t.Fatal("missing availability state")
+	}
+	if state.ExhaustedUntil == nil || !state.ExhaustedUntil.Equal(retryAfter) {
+		t.Fatalf("ExhaustedUntil = %v, want Retry-After %v", state.ExhaustedUntil, retryAfter)
+	}
+}
+
+func TestAvailabilityStateAppliesExponentialBackoffWithoutRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	r := NewStatic(testConfig(), nil)
+	fixedNow := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	r.availability.now = func() time.Time { return fixedNow }
+	candidate := RouteCandidate{ProviderName: "openai_api", ProviderModel: "gpt-5.2", RequestedModel: "coding"}
+	err := &provider.Error{Code: provider.ErrorProviderExhausted, Retryable: true, Provider: "openai_api"}
+
+	r.MarkFailure(candidate, err)
+	state, ok := r.Availability("openai_api", "gpt-5.2")
+	if !ok || state.ExhaustedUntil == nil || !state.ExhaustedUntil.Equal(fixedNow.Add(30*time.Second)) {
+		t.Fatalf("first failure state = %#v", state)
+	}
+	r.MarkFailure(candidate, err)
+	state, ok = r.Availability("openai_api", "gpt-5.2")
+	if !ok || state.ExhaustedUntil == nil || !state.ExhaustedUntil.Equal(fixedNow.Add(time.Minute)) {
+		t.Fatalf("second failure state = %#v", state)
+	}
+}
+
+func TestResolveSyntheticModelSkipsUnavailableCandidateAndRecovers(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfigWithSynthetic()
+	r := NewStatic(cfg, map[string]provider.Provider{
+		"codex_sub":  fakeProvider{name: "codex_sub"},
+		"openai_api": fakeProvider{name: "openai_api"},
+	})
+	first := RouteCandidate{ProviderName: "codex_sub", ProviderModel: "gpt-5.1-codex-max", RequestedModel: "coding", Synthetic: true}
+	retryAfter := time.Now().Add(time.Hour)
+	r.MarkFailure(first, &provider.Error{Code: provider.ErrorProviderRateLimited, Retryable: true, Provider: "codex_sub", RetryAfter: &retryAfter})
+
+	candidates, err := r.Resolve(context.Background(), ir.Request{Model: "coding"})
+	if err != nil {
+		t.Fatalf("Resolve during exhaustion: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ProviderName != "openai_api" {
+		t.Fatalf("candidates during exhaustion = %#v, want only openai_api", candidates)
+	}
+
+	r.MarkSuccess(first)
+	candidates, err = r.Resolve(context.Background(), ir.Request{Model: "coding"})
+	if err != nil {
+		t.Fatalf("Resolve after recovery: %v", err)
+	}
+	if len(candidates) != 2 || candidates[0].ProviderName != "codex_sub" {
+		t.Fatalf("candidates after recovery = %#v, want codex_sub restored first", candidates)
+	}
+}
+
 func TestAvailabilityStateMarksFailureAndSuccess(t *testing.T) {
 	t.Parallel()
 

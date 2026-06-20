@@ -69,7 +69,7 @@ func (p *OpenAICompatibleProvider) Complete(ctx context.Context, req ir.Request)
 		return nil, fmt.Errorf("read upstream chat completion response: %w", err)
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		return nil, classifyHTTPStatus(p.name, httpResp.StatusCode, respBody)
+		return nil, classifyHTTPStatus(p.name, httpResp.StatusCode, httpResp.Header, respBody)
 	}
 
 	var chatResp openaiapi.ChatCompletionResponse
@@ -92,7 +92,7 @@ func (p *OpenAICompatibleProvider) Stream(ctx context.Context, req ir.Request) (
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		defer httpResp.Body.Close()
 		respBody, _ := io.ReadAll(httpResp.Body)
-		return nil, classifyHTTPStatus(p.name, httpResp.StatusCode, respBody)
+		return nil, classifyHTTPStatus(p.name, httpResp.StatusCode, httpResp.Header, respBody)
 	}
 
 	events := make(chan ir.Event)

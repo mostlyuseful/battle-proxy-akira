@@ -150,6 +150,7 @@ func TestOpenAICompatibleProviderClassifiesHTTPStatusErrors(t *testing.T) {
 		{name: "too large", status: http.StatusRequestEntityTooLarge, wantCode: ErrorInputTooLarge, retryable: false},
 		{name: "unsupported modality", status: http.StatusUnprocessableEntity, wantCode: ErrorUnsupportedModality, retryable: false},
 		{name: "payload code", status: http.StatusBadRequest, body: `{"error":{"code":"context_length_exceeded","message":"secret"}}`, wantCode: ErrorInputTooLarge, retryable: false},
+		{name: "exhaustion payload code", status: http.StatusTooManyRequests, body: `{"error":{"code":"insufficient_quota"}}`, wantCode: ErrorProviderExhausted, retryable: true},
 	}
 
 	for _, tt := range tests {
@@ -184,6 +185,37 @@ func TestOpenAICompatibleProviderClassifiesHTTPStatusErrors(t *testing.T) {
 				t.Fatalf("classified error leaked provider details: %q", err.Error())
 			}
 		})
+	}
+}
+
+func TestOpenAICompatibleProviderParsesRetryAfterHeader(t *testing.T) {
+	t.Parallel()
+
+	before := time.Now()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	}))
+	defer upstream.Close()
+
+	provider, err := NewOpenAICompatible("openai_api", config.ProviderConfig{BaseURL: upstream.URL}, staticTokenSource("test-token"), upstream.Client())
+	if err != nil {
+		t.Fatalf("NewOpenAICompatible: %v", err)
+	}
+
+	_, err = provider.Complete(context.Background(), validTextRequest())
+	if err == nil {
+		t.Fatal("Complete returned nil error, want classified provider error")
+	}
+	var providerErr *Error
+	if !errors.As(err, &providerErr) {
+		t.Fatalf("error = %T %[1]v, want *provider.Error", err)
+	}
+	after := time.Now()
+	min := before.Add(2 * time.Second)
+	max := after.Add(2 * time.Second)
+	if providerErr.RetryAfter == nil || providerErr.RetryAfter.Before(min) || providerErr.RetryAfter.After(max) {
+		t.Fatalf("RetryAfter = %v, want between %v and %v", providerErr.RetryAfter, min, max)
 	}
 }
 

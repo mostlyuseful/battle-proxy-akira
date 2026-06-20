@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -27,6 +29,7 @@ type Error struct {
 	Retryable  bool
 	StatusCode int
 	Provider   string
+	RetryAfter *time.Time
 }
 
 func (e *Error) Error() string {
@@ -54,7 +57,7 @@ func ErrorCode(err error) string {
 	return ""
 }
 
-func classifyHTTPStatus(providerName string, status int, body []byte) *Error {
+func classifyHTTPStatus(providerName string, status int, header http.Header, body []byte) *Error {
 	code := codeFromStatus(status)
 	if payloadCode := codeFromErrorPayload(body); payloadCode != "" {
 		code = payloadCode
@@ -64,6 +67,7 @@ func classifyHTTPStatus(providerName string, status int, body []byte) *Error {
 		Retryable:  retryableStatus(status),
 		StatusCode: status,
 		Provider:   providerName,
+		RetryAfter: parseRetryAfter(header.Get("Retry-After")),
 	}
 }
 
@@ -132,6 +136,8 @@ func codeFromErrorPayload(body []byte) string {
 		return ErrorInputTooLarge
 	case "rate_limit_exceeded", "rate_limited", "too_many_requests":
 		return ErrorProviderRateLimited
+	case "provider_exhausted", "insufficient_quota", "quota_exceeded", "billing_hard_limit_reached":
+		return ErrorProviderExhausted
 	case "authentication_error", "invalid_api_key", "provider_auth_failed":
 		return ErrorProviderAuthFailed
 	case "permission_error", "policy_denied", "forbidden":
@@ -139,6 +145,24 @@ func codeFromErrorPayload(body []byte) string {
 	default:
 		return ""
 	}
+}
+
+func parseRetryAfter(raw string) *time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil {
+		if seconds < 0 {
+			seconds = 0
+		}
+		at := time.Now().Add(time.Duration(seconds) * time.Second)
+		return &at
+	}
+	if at, err := http.ParseTime(raw); err == nil {
+		return &at
+	}
+	return nil
 }
 
 func isRetryableNetworkError(err error) bool {
