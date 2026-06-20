@@ -7,6 +7,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ type Snapshot struct {
 type Manager struct {
 	load       func() (*config.Config, error)
 	httpClient *http.Client
+	logger     *slog.Logger
 
 	mu      sync.Mutex // serializes Reload
 	current atomic.Pointer[Snapshot]
@@ -39,15 +41,24 @@ type Manager struct {
 // load must return a freshly validated *config.Config on each call.
 // httpClient is used for all upstream provider requests; nil defaults to http.DefaultClient.
 func NewManager(load func() (*config.Config, error), httpClient *http.Client) (*Manager, error) {
+	return NewManagerWithLogger(load, httpClient, nil)
+}
+
+// NewManagerWithLogger is NewManager with optional verbose diagnostics.
+func NewManagerWithLogger(load func() (*config.Config, error), httpClient *http.Client, logger *slog.Logger) (*Manager, error) {
 	if load == nil {
 		return nil, fmt.Errorf("runtime: load function is required")
 	}
-	m := &Manager{load: load, httpClient: httpClient}
+	m := &Manager{load: load, httpClient: httpClient, logger: logger}
 	snap, err := m.build()
 	if err != nil {
 		return nil, err
 	}
 	m.current.Store(snap)
+	if logger != nil {
+		models, _ := snap.Router.Models(context.Background())
+		logger.Info("runtime manager built", "providers", len(snap.Providers), "models", len(models))
+	}
 	return m, nil
 }
 
@@ -65,14 +76,25 @@ func (m *Manager) Reload() error {
 
 	snap, err := m.build()
 	if err != nil {
+		if m.logger != nil {
+			m.logger.Warn("config reload failed", "error", err)
+		}
 		return err
 	}
 
 	if old := m.current.Load(); old != nil && old.Router != nil && snap.Router != nil {
-		snap.Router.RestoreAvailability(reconcileAvailability(old.Router.AvailabilityStates(), snap.Config))
+		kept := reconcileAvailability(old.Router.AvailabilityStates(), snap.Config)
+		snap.Router.RestoreAvailability(kept)
+		if m.logger != nil {
+			m.logger.Info("availability state reconciled", "kept", len(kept))
+		}
 	}
 
 	m.current.Store(snap)
+	if m.logger != nil {
+		models, _ := snap.Router.Models(context.Background())
+		m.logger.Info("runtime config reloaded", "providers", len(snap.Providers), "models", len(models))
+	}
 	return nil
 }
 
@@ -84,11 +106,15 @@ func (m *Manager) build() (*Snapshot, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("runtime: loaded config is nil")
 	}
-	providers, err := buildProviders(*cfg, m.httpClient)
+	providers, err := buildProviders(*cfg, m.httpClient, m.logger)
 	if err != nil {
 		return nil, err
 	}
 	r := router.NewStatic(*cfg, providers)
+	if m.logger != nil {
+		models, _ := r.Models(context.Background())
+		m.logger.Info("runtime snapshot built", "providers", len(providers), "models", len(models))
+	}
 	return &Snapshot{Config: cfg, Router: r, Providers: providers}, nil
 }
 
@@ -125,7 +151,7 @@ func (m *Manager) Models(ctx context.Context) ([]ir.Model, error) {
 }
 
 // buildProviders constructs provider adapters for every configured provider.
-func buildProviders(cfg config.Config, httpClient *http.Client) (map[string]provider.Provider, error) {
+func buildProviders(cfg config.Config, httpClient *http.Client, logger *slog.Logger) (map[string]provider.Provider, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
@@ -135,11 +161,17 @@ func buildProviders(cfg config.Config, httpClient *http.Client) (map[string]prov
 		if err != nil {
 			return nil, fmt.Errorf("provider %q: %w", name, err)
 		}
+		if logger != nil {
+			logger.Info("provider token source configured", "provider", name, "auth_type", providerCfg.Auth.Type)
+		}
 		p, err := provider.NewOpenAICompatible(name, providerCfg, tokenSource, httpClient)
 		if err != nil {
 			return nil, fmt.Errorf("provider %q: %w", name, err)
 		}
 		providers[name] = p
+		if logger != nil {
+			logger.Info("provider configured", "provider", name, "base_url", providerCfg.BaseURL, "models", len(providerCfg.Models))
+		}
 	}
 	return providers, nil
 }

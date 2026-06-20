@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -43,6 +44,11 @@ type ImageInputMetadata struct {
 
 // New returns a logger for the configured mode. off returns a no-op logger.
 func New(cfg config.LoggingConfig) (Logger, error) {
+	return NewWithLogger(cfg, nil)
+}
+
+// NewWithLogger returns a logger and optional verbose diagnostics.
+func NewWithLogger(cfg config.LoggingConfig, logger *slog.Logger) (Logger, error) {
 	mode := cfg.Mode
 	if mode == "" {
 		if cfg.Enabled {
@@ -52,6 +58,9 @@ func New(cfg config.LoggingConfig) (Logger, error) {
 		}
 	}
 	if !cfg.Enabled || mode == config.LoggingModeOff {
+		if logger != nil {
+			logger.Info("request logging disabled", "configured_mode", mode)
+		}
 		return NoopLogger{}, nil
 	}
 	if mode != config.LoggingModeMetadataOnly {
@@ -60,7 +69,10 @@ func New(cfg config.LoggingConfig) (Logger, error) {
 	if cfg.Path == "" {
 		return nil, fmt.Errorf("logging path is required for metadata_only mode")
 	}
-	return &JSONLLogger{path: cfg.Path}, nil
+	if logger != nil {
+		logger.Info("metadata request logging configured", "path", cfg.Path)
+	}
+	return &JSONLLogger{path: cfg.Path, logger: logger}, nil
 }
 
 // NoopLogger discards request records.
@@ -71,8 +83,9 @@ func (NoopLogger) LogRequest(context.Context, RequestLogRecord) error { return n
 
 // JSONLLogger appends one JSON object per request to a local file.
 type JSONLLogger struct {
-	path string
-	mu   sync.Mutex
+	path   string
+	mu     sync.Mutex
+	logger *slog.Logger
 }
 
 // LogRequest appends a metadata log record to the configured JSONL file.
@@ -98,11 +111,20 @@ func (l *JSONLLogger) LogRequest(ctx context.Context, rec RequestLogRecord) erro
 
 	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
+		if l.logger != nil {
+			l.logger.Warn("open metadata log failed", "path", l.path, "error", err)
+		}
 		return err
 	}
 	defer f.Close()
 	if _, err := f.Write(append(encoded, '\n')); err != nil {
+		if l.logger != nil {
+			l.logger.Warn("write metadata log failed", "path", l.path, "error", err)
+		}
 		return err
+	}
+	if l.logger != nil {
+		l.logger.Info("metadata request log written", "path", l.path, "request_id", rec.RequestID)
 	}
 	return nil
 }

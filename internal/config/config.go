@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"strings"
@@ -162,6 +163,42 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// LogVerboseDiagnostics emits non-sensitive configuration merge/default messages.
+func (c Config) LogVerboseDiagnostics(logger *slog.Logger, path string) {
+	if logger == nil {
+		return
+	}
+	if path == "" {
+		logger.Info("using default configuration", "config_path", "")
+		return
+	}
+	logger.Info("loaded configuration file", "config_path", path)
+	if c.Server.Addr == "" {
+		logger.Info("default server address used", "addr", DefaultAddr)
+	}
+	if c.Server.ReadTimeoutSeconds == 0 {
+		logger.Info("default server read timeout used", "read_timeout_seconds", DefaultReadTimeoutSeconds)
+	}
+	if c.Server.IdleTimeoutSeconds == 0 {
+		logger.Info("default server idle timeout used", "idle_timeout_seconds", DefaultIdleTimeoutSeconds)
+	}
+	if c.Server.MaxBodyBytes == 0 {
+		logger.Info("default max body bytes used", "max_body_bytes", DefaultMaxBodyBytes)
+	}
+	if c.ClientAuth.Mode == "" {
+		logger.Info("default client auth mode used", "mode", ClientAuthModeNone)
+	}
+	if c.Logging.Mode == "" {
+		logger.Info("default logging mode used", "mode", LoggingModeOff)
+	}
+	if len(c.Providers) == 0 {
+		logger.Info("no upstream providers configured")
+	}
+	if len(c.SyntheticModels) == 0 {
+		logger.Info("no synthetic models configured")
+	}
+}
+
 // Validate returns all known configuration problems without including secret values.
 func (c Config) Validate() error {
 	var problems []string
@@ -238,33 +275,35 @@ func (c Config) Validate() error {
 		}
 		switch synthetic.Strategy {
 		case SyntheticStrategyFirstAvailable, SyntheticStrategyLeastCostAvailable:
-		case "":
-			problems = append(problems, path+".strategy is required")
 		default:
-			problems = append(problems, path+".strategy must be one of: first_available, least_cost_available")
+			problems = append(problems, path+".strategy must be first_available or least_cost_available")
 		}
 		if len(synthetic.Candidates) == 0 {
-			problems = append(problems, path+".candidates must contain at least one provider:model reference")
+			problems = append(problems, path+".candidates must contain at least one candidate")
 		}
-		for i, candidate := range synthetic.Candidates {
-			if !c.validCandidate(candidate) {
-				problems = append(problems, fmt.Sprintf("%s.candidates[%d] must reference an existing provider:model", path, i))
+		for _, candidate := range synthetic.Candidates {
+			providerName, providerModel, ok := strings.Cut(candidate, ":")
+			if !ok || strings.TrimSpace(providerName) == "" || strings.TrimSpace(providerModel) == "" {
+				problems = append(problems, path+".candidates contains invalid provider:model reference "+candidate)
+				continue
+			}
+			if _, ok := c.Providers[providerName]; !ok {
+				problems = append(problems, path+".candidates references unknown provider "+providerName)
+			} else if _, ok := c.Providers[providerName].Models[providerModel]; !ok {
+				problems = append(problems, path+".candidates references unknown model "+providerModel+" for provider "+providerName)
 			}
 		}
 	}
 
-	if c.Logging.Mode == "" {
-		if c.Logging.Enabled {
-			problems = append(problems, "logging.mode is required when logging is enabled")
-		}
-	} else {
-		switch c.Logging.Mode {
-		case LoggingModeOff, LoggingModeMetadataOnly, LoggingModeFullTranscript, LoggingModeFullTranscriptPerRequest:
-		default:
-			problems = append(problems, "logging.mode must be one of: off, metadata_only, full_transcript, full_transcript_per_request")
-		}
+	switch c.Logging.Mode {
+	case "", LoggingModeOff, LoggingModeMetadataOnly:
+	default:
+		problems = append(problems, "logging.mode must be one of: off, metadata_only, full_transcript, full_transcript_per_request")
 	}
-	if c.Logging.Enabled && c.Logging.Mode != LoggingModeOff && c.Logging.Path == "" {
+	if c.Logging.Enabled && c.Logging.Mode == "" {
+		problems = append(problems, "logging.mode is required when logging is enabled")
+	}
+	if c.Logging.Enabled && c.Logging.Path == "" {
 		problems = append(problems, "logging.path is required when logging is enabled")
 	}
 
@@ -274,21 +313,12 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// ValidationError groups all discovered config validation problems.
-type ValidationError struct {
-	Problems []string
-}
-
-func (e ValidationError) Error() string {
-	return "invalid config: " + strings.Join(e.Problems, "; ")
-}
-
-func ensureMaps(cfg *Config) {
-	if cfg.Providers == nil {
-		cfg.Providers = map[string]ProviderConfig{}
+func ensureMaps(c *Config) {
+	if c.Providers == nil {
+		c.Providers = map[string]ProviderConfig{}
 	}
-	if cfg.SyntheticModels == nil {
-		cfg.SyntheticModels = map[string]SyntheticModelConfig{}
+	if c.SyntheticModels == nil {
+		c.SyntheticModels = map[string]SyntheticModelConfig{}
 	}
 }
 
@@ -298,44 +328,52 @@ func validateProviderAuth(path string, auth AuthConfig) []string {
 		return append(problems, path+".type is required")
 	}
 	switch auth.Type {
-	case AuthTypeBearerEnv, AuthTypeEnvAccessToken:
+	case AuthTypeBearerEnv:
 		if auth.Env == "" {
-			problems = append(problems, path+".env is required for env-based auth")
+			problems = append(problems, path+".env is required for bearer_env auth")
+		}
+	case AuthTypeEnvAccessToken:
+		if auth.Env == "" {
+			problems = append(problems, path+".env is required for env_access_token auth")
 		}
 	case AuthTypeFileAccessToken:
 		if auth.File == "" {
-			problems = append(problems, path+".file is required for file access-token auth")
+			problems = append(problems, path+".file is required for file_access_token auth")
 		}
 	case AuthTypeCommandAccessToken:
-		if len(auth.Command) == 0 {
-			problems = append(problems, path+".command is required for command access-token auth")
+		if len(normalizeCommand(auth.Command)) == 0 {
+			problems = append(problems, path+".command is required for access_token_command auth")
 		}
 		if auth.RefreshBeforeSeconds < 0 {
 			problems = append(problems, path+".refresh_before_seconds must be non-negative")
 		}
 	default:
-		problems = append(problems, path+".type must be a supported provider auth type")
+		problems = append(problems, path+".type must be one of: bearer_env, env_access_token, file_access_token, access_token_command")
 	}
 	return problems
 }
 
-func validHTTPURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
+func normalizeCommand(command []string) []string {
+	out := make([]string, 0, len(command))
+	for _, arg := range command {
+		arg = strings.TrimSpace(arg)
+		if arg != "" {
+			out = append(out, arg)
+		}
 	}
-	return u.IsAbs() && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https")
+	return out
 }
 
-func (c Config) validCandidate(candidate string) bool {
-	providerName, modelName, ok := strings.Cut(candidate, ":")
-	if !ok || providerName == "" || modelName == "" {
-		return false
-	}
-	provider, ok := c.Providers[providerName]
-	if !ok {
-		return false
-	}
-	_, ok = provider.Models[modelName]
-	return ok
+func validHTTPURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// ValidationError groups all discovered config validation problems.
+type ValidationError struct {
+	Problems []string
+}
+
+func (e ValidationError) Error() string {
+	return "invalid config: " + strings.Join(e.Problems, "; ")
 }

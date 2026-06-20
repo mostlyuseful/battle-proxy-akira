@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,7 +25,14 @@ const (
 )
 
 func main() {
-	cfg, err := loadRuntimeConfig()
+	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	verbose := flags.Bool("verbose", false, "log informational and debug messages")
+	if err := flags.Parse(os.Args[1:]); err != nil {
+		slog.Error("parse flags", "error", err)
+		os.Exit(1)
+	}
+
+	cfg, err := loadRuntimeConfigWithVerbose(*verbose, slog.Default())
 	if err != nil {
 		slog.Error("load config", "error", err)
 		os.Exit(1)
@@ -35,18 +43,31 @@ func main() {
 		slog.Error("build runtime", "error", err)
 		os.Exit(1)
 	}
+	if *verbose {
+		slog.Default().Info("runtime manager built", "providers", len(manager.Current().Providers))
+	}
 
 	metricsCollector := metrics.NewCollector()
+	if *verbose {
+		slog.Default().Info("metrics collector initialized")
+	}
 
 	clientAuth, err := api.NewClientAuthMiddleware(cfg.ClientAuth)
 	if err != nil {
 		slog.Error("build client auth", "error", err)
 		os.Exit(1)
 	}
+	if *verbose {
+		slog.Default().Info("client auth configured", "mode", cfg.ClientAuth.Mode)
+	}
+
 	logger, err := requestlog.New(cfg.Logging)
 	if err != nil {
 		slog.Error("build request logger", "error", err)
 		os.Exit(1)
+	}
+	if *verbose {
+		slog.Default().Info("request logger configured", "enabled", cfg.Logging.Enabled, "mode", cfg.Logging.Mode, "path", cfg.Logging.Path)
 	}
 
 	handler := api.NewServer(
@@ -57,7 +78,13 @@ func main() {
 		api.WithServerConfig(cfg.Server),
 		api.WithMetrics(metricsCollector),
 	)
+	if *verbose {
+		slog.Default().Info("api server built", "addr", cfg.Server.Addr, "max_body_bytes", cfg.Server.MaxBodyBytes)
+	}
 	server := newHTTPServer(cfg.Server, handler)
+	if *verbose {
+		slog.Default().Info("http server configured", "addr", server.Addr, "read_timeout", secondsDuration(cfg.Server.ReadTimeoutSeconds), "write_timeout", secondsDuration(cfg.Server.WriteTimeoutSeconds), "idle_timeout", secondsDuration(cfg.Server.IdleTimeoutSeconds))
+	}
 
 	shutdownSignals := make(chan os.Signal, 1)
 	signal.Notify(shutdownSignals, syscall.SIGINT, syscall.SIGTERM)
@@ -67,6 +94,9 @@ func main() {
 	signal.Notify(reloadSignals, syscall.SIGHUP)
 	defer signal.Stop(reloadSignals)
 	go runReloadLoop(reloadSignals, manager.Reload)
+	if *verbose {
+		slog.Default().Info("reload signal handler configured", "signal", "SIGHUP")
+	}
 
 	slog.Info("starting llm proxy", "addr", server.Addr)
 	if err := serve(context.Background(), server, shutdownSignals, defaultShutdownTimeout); err != nil {
@@ -88,13 +118,28 @@ func runReloadLoop(signals <-chan os.Signal, reload func() error) {
 }
 
 func loadRuntimeConfig() (*config.Config, error) {
-	cfg, err := config.Load(os.Getenv(configPathEnv))
+	return loadRuntimeConfigWithVerbose(false, nil)
+}
+
+func loadRuntimeConfigWithVerbose(verbose bool, logger *slog.Logger) (*config.Config, error) {
+	path := os.Getenv(configPathEnv)
+	cfg, err := config.Load(path)
 	if err != nil {
 		return nil, err
+	}
+	if verbose && logger != nil {
+		if path == "" {
+			logger.Info("using default configuration", "config_path", "")
+		} else {
+			logger.Info("loaded configuration file", "config_path", path)
+		}
 	}
 	// Preserve the early development env override while allowing JSON config to be the default source of truth.
 	if addr := os.Getenv(addrOverrideEnv); addr != "" {
 		cfg.Server.Addr = addr
+		if verbose && logger != nil {
+			logger.Info("overrode config server address from environment", "addr", addr)
+		}
 	}
 	return cfg, nil
 }

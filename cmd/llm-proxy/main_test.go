@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -41,6 +42,32 @@ func TestNewHTTPServerAppliesConfiguredTimeouts(t *testing.T) {
 	}
 	if server.Handler == nil {
 		t.Fatal("Handler is nil")
+	}
+}
+
+func TestLoadRuntimeConfigWithVerbose(t *testing.T) {
+	t.Setenv(configPathEnv, "")
+	t.Setenv(addrOverrideEnv, "")
+
+	cfg, err := loadRuntimeConfigWithVerbose(false, nil)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Server.Addr != config.DefaultAddr {
+		t.Fatalf("Addr = %q, want default %q", cfg.Server.Addr, config.DefaultAddr)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"server":{"addr":"127.0.0.1:9090"}}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv(configPathEnv, path)
+	cfg, err = loadRuntimeConfigWithVerbose(true, nil)
+	if err != nil {
+		t.Fatalf("load config file: %v", err)
+	}
+	if cfg.Server.Addr != "127.0.0.1:9090" {
+		t.Fatalf("Addr = %q, want configured addr", cfg.Server.Addr)
 	}
 }
 

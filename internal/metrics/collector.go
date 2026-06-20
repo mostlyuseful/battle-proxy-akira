@@ -5,6 +5,7 @@ package metrics
 
 import (
 	"encoding/json"
+	"log/slog"
 	"math"
 	"sort"
 	"sync"
@@ -108,17 +109,28 @@ type Collector struct {
 	latencyByBucket map[requestKey]*latencySummary
 	recentByBucket  map[requestKey]*recentRing
 	startedAt       time.Time
+	logger          *slog.Logger
 }
 
 // NewCollector creates an empty collector.
 func NewCollector() *Collector {
-	return &Collector{
+	return NewCollectorWithLogger(nil)
+}
+
+// NewCollectorWithLogger creates an empty collector with optional verbose diagnostics.
+func NewCollectorWithLogger(logger *slog.Logger) *Collector {
+	c := &Collector{
 		requests:        map[requestKey]int64{},
 		errors:          map[string]int64{},
 		latencyByBucket: map[requestKey]*latencySummary{},
 		recentByBucket:  map[requestKey]*recentRing{},
 		startedAt:       time.Now(),
+		logger:          logger,
 	}
+	if logger != nil {
+		logger.Info("metrics collector initialized")
+	}
+	return c
 }
 
 // RecordRequest increments the request counter for one endpoint/status-class
@@ -150,6 +162,9 @@ func (c *Collector) RecordRequest(endpoint, statusClass string, latency time.Dur
 		c.recentByBucket[key] = ring
 	}
 	ring.add(latency)
+	if c.logger != nil {
+		c.logger.Info("metrics request recorded", "endpoint", endpoint, "status_class", statusClass, "latency_ms", latency.Milliseconds())
+	}
 }
 
 // RecordError increments the error counter for one internal error code.
@@ -160,17 +175,20 @@ func (c *Collector) RecordError(code string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.errors[code]++
+	if c.logger != nil {
+		c.logger.Info("metrics error recorded", "code", code)
+	}
 }
 
 // Snapshot is a point-in-time view of collected metrics for JSON exposition.
 type Snapshot struct {
-	StartedAt       time.Time         `json:"started_at"`
-	GeneratedAt     time.Time         `json:"generated_at"`
-	Requests        []RequestMetric   `json:"requests"`
-	Errors          []ErrorMetric     `json:"errors,omitempty"`
-	Latency         []LatencyMetric   `json:"latency"`
-	TotalRequests   int64             `json:"total_requests"`
-	TotalErrors     int64             `json:"total_errors"`
+	StartedAt     time.Time       `json:"started_at"`
+	GeneratedAt   time.Time       `json:"generated_at"`
+	Requests      []RequestMetric `json:"requests"`
+	Errors        []ErrorMetric   `json:"errors,omitempty"`
+	Latency       []LatencyMetric `json:"latency"`
+	TotalRequests int64           `json:"total_requests"`
+	TotalErrors   int64           `json:"total_errors"`
 }
 
 // RequestMetric is one endpoint/status-class request count bucket.
@@ -269,6 +287,9 @@ func (c *Collector) Snapshot() Snapshot {
 		}
 		return snap.Latency[i].Endpoint < snap.Latency[j].Endpoint
 	})
+	if c.logger != nil {
+		c.logger.Info("metrics snapshot generated", "total_requests", snap.TotalRequests, "total_errors", snap.TotalErrors)
+	}
 	return snap
 }
 
@@ -290,7 +311,7 @@ func percentile(values []time.Duration, p float64) time.Duration {
 		return sorted[0]
 	}
 	if p >= 1 {
-		return sorted[len(sorted)-1]
+		return sorted[len(values)-1]
 	}
 	// Nearest-rank method.
 	rank := int(math.Ceil(p * float64(len(sorted))))

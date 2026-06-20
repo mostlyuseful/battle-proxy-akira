@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path"
@@ -25,10 +26,16 @@ type OpenAICompatibleProvider struct {
 	tokenSource auth.TokenSource
 	httpClient  *http.Client
 	models      map[string]config.ModelConfig
+	logger      *slog.Logger
 }
 
 // NewOpenAICompatible constructs an OpenAI-compatible provider adapter.
 func NewOpenAICompatible(name string, cfg config.ProviderConfig, tokenSource auth.TokenSource, httpClient *http.Client) (*OpenAICompatibleProvider, error) {
+	return NewOpenAICompatibleWithLogger(name, cfg, tokenSource, httpClient, nil)
+}
+
+// NewOpenAICompatibleWithLogger constructs an OpenAI-compatible provider adapter with optional verbose diagnostics.
+func NewOpenAICompatibleWithLogger(name string, cfg config.ProviderConfig, tokenSource auth.TokenSource, httpClient *http.Client, logger *slog.Logger) (*OpenAICompatibleProvider, error) {
 	if strings.TrimSpace(name) == "" {
 		return nil, fmt.Errorf("provider name is required")
 	}
@@ -42,12 +49,16 @@ func NewOpenAICompatible(name string, cfg config.ProviderConfig, tokenSource aut
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	if logger != nil {
+		logger.Info("openai-compatible provider initialized", "provider", name, "base_url", parsed.String(), "models", len(cfg.Models))
+	}
 	return &OpenAICompatibleProvider{
 		name:        name,
 		baseURL:     parsed,
 		tokenSource: tokenSource,
 		httpClient:  httpClient,
 		models:      cfg.Models,
+		logger:      logger,
 	}, nil
 }
 
@@ -69,6 +80,9 @@ func (p *OpenAICompatibleProvider) Complete(ctx context.Context, req ir.Request)
 		return nil, fmt.Errorf("read upstream chat completion response: %w", err)
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		if p.logger != nil {
+			p.logger.Warn("upstream chat completion returned non-2xx", "provider", p.name, "model", req.Model, "status", httpResp.StatusCode)
+		}
 		return nil, classifyHTTPStatus(p.name, httpResp.StatusCode, httpResp.Header, respBody)
 	}
 
@@ -79,6 +93,9 @@ func (p *OpenAICompatibleProvider) Complete(ctx context.Context, req ir.Request)
 	irResp, err := chatResp.ToIR(respBody)
 	if err != nil {
 		return nil, fmt.Errorf("normalize upstream chat completion response: %w", err)
+	}
+	if p.logger != nil {
+		p.logger.Info("upstream chat completion completed", "provider", p.name, "model", req.Model, "status", httpResp.StatusCode)
 	}
 	return &irResp, nil
 }
@@ -92,6 +109,9 @@ func (p *OpenAICompatibleProvider) Stream(ctx context.Context, req ir.Request) (
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		defer httpResp.Body.Close()
 		respBody, _ := io.ReadAll(httpResp.Body)
+		if p.logger != nil {
+			p.logger.Warn("upstream chat stream returned non-2xx", "provider", p.name, "model", req.Model, "status", httpResp.StatusCode)
+		}
 		return nil, classifyHTTPStatus(p.name, httpResp.StatusCode, httpResp.Header, respBody)
 	}
 
@@ -104,9 +124,15 @@ func (p *OpenAICompatibleProvider) Stream(ctx context.Context, req ir.Request) (
 		for {
 			event, err := reader.Read()
 			if err == io.EOF || ctx.Err() != nil {
+				if p.logger != nil && ctx.Err() != nil {
+					p.logger.Info("upstream chat stream stopped", "provider", p.name, "model", req.Model, "reason", ctx.Err())
+				}
 				return
 			}
 			if err != nil {
+				if p.logger != nil {
+					p.logger.Warn("upstream chat stream read failed", "provider", p.name, "model", req.Model, "error", err)
+				}
 				return
 			}
 
@@ -124,10 +150,16 @@ func (p *OpenAICompatibleProvider) Stream(ctx context.Context, req ir.Request) (
 			select {
 			case events <- irEvent:
 			case <-ctx.Done():
+				if p.logger != nil {
+					p.logger.Info("upstream chat stream context canceled", "provider", p.name, "model", req.Model, "reason", ctx.Err())
+				}
 				return
 			}
 		}
 	}()
+	if p.logger != nil {
+		p.logger.Info("upstream chat stream started", "provider", p.name, "model", req.Model, "status", httpResp.StatusCode)
+	}
 	return events, nil
 }
 
@@ -154,8 +186,14 @@ func (p *OpenAICompatibleProvider) Health(ctx context.Context) error {
 }
 
 func (p *OpenAICompatibleProvider) doChatCompletion(ctx context.Context, req ir.Request, stream bool) (*http.Response, error) {
+	if p.logger != nil {
+		p.logger.Info("sending upstream chat completion request", "provider", p.name, "model", req.Model, "stream", stream, "endpoint", p.endpoint("chat/completions"))
+	}
 	token, err := p.tokenSource.Token(ctx)
 	if err != nil {
+		if p.logger != nil {
+			p.logger.Warn("upstream provider auth failed", "provider", p.name, "model", req.Model, "error", err)
+		}
 		return nil, &Error{Code: ErrorProviderAuthFailed, Retryable: false, Provider: p.name}
 	}
 
@@ -184,7 +222,13 @@ func (p *OpenAICompatibleProvider) doChatCompletion(ctx context.Context, req ir.
 
 	httpResp, err := p.httpClient.Do(httpReq)
 	if err != nil {
+		if p.logger != nil {
+			p.logger.Warn("upstream chat completion request failed", "provider", p.name, "model", req.Model, "stream", stream, "error", err)
+		}
 		return nil, classifyNetworkError(p.name, err)
+	}
+	if p.logger != nil {
+		p.logger.Info("upstream chat completion response received", "provider", p.name, "model", req.Model, "stream", stream, "status", httpResp.StatusCode)
 	}
 	return httpResp, nil
 }

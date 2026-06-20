@@ -137,7 +137,7 @@ func TestValidateReportsInvalidSyntheticCandidateReference(t *testing.T) {
 	if err == nil {
 		t.Fatal("Validate returned nil, want invalid candidate error")
 	}
-	if !strings.Contains(err.Error(), "synthetic_models.coding.candidates[0] must reference an existing provider:model") {
+	if !strings.Contains(err.Error(), "synthetic_models.coding.candidates references unknown model") {
 		t.Fatalf("validation error = %q", err.Error())
 	}
 }

@@ -4,6 +4,7 @@ package router
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -69,14 +70,23 @@ type StaticRouter struct {
 	cfg          config.Config
 	providers    map[string]provider.Provider
 	availability *AvailabilityTracker
+	logger       *slog.Logger
 }
 
 // NewStatic creates a deterministic router for configured direct and synthetic models.
 func NewStatic(cfg config.Config, providers map[string]provider.Provider) *StaticRouter {
+	return NewStaticWithLogger(cfg, providers, nil)
+}
+
+// NewStaticWithLogger creates a deterministic router with optional verbose diagnostics.
+func NewStaticWithLogger(cfg config.Config, providers map[string]provider.Provider, logger *slog.Logger) *StaticRouter {
 	if providers == nil {
 		providers = map[string]provider.Provider{}
 	}
-	return &StaticRouter{cfg: cfg, providers: providers, availability: NewAvailabilityTracker()}
+	if logger != nil {
+		logger.Info("router configured", "providers", len(providers), "synthetic_models", len(cfg.SyntheticModels))
+	}
+	return &StaticRouter{cfg: cfg, providers: providers, availability: NewAvailabilityTracker(), logger: logger}
 }
 
 // Resolve returns route candidates for req.Model.
@@ -90,6 +100,9 @@ func (r *StaticRouter) Resolve(ctx context.Context, req ir.Request) ([]RouteCand
 	}
 
 	requiredModalities := req.InputModalities()
+	if r.logger != nil {
+		r.logger.Info("resolving model", "requested_model", model, "modalities", requiredModalities)
+	}
 	if providerName, providerModel, ok := strings.Cut(model, ":"); ok {
 		return r.resolveProviderModel(providerName, providerModel, model, requiredModalities)
 	}
@@ -157,12 +170,18 @@ func (r *StaticRouter) MarkFailure(candidate RouteCandidate, err error) {
 	if r.availability != nil {
 		r.availability.MarkFailure(candidate, err)
 	}
+	if r.logger != nil {
+		r.logger.Warn("provider candidate marked failed", "provider", candidate.ProviderName, "model", candidate.ProviderModel, "requested_model", candidate.RequestedModel, "error", err)
+	}
 }
 
 // MarkSuccess records provider/model availability state for the route candidate.
 func (r *StaticRouter) MarkSuccess(candidate RouteCandidate) {
 	if r.availability != nil {
 		r.availability.MarkSuccess(candidate)
+	}
+	if r.logger != nil {
+		r.logger.Info("provider candidate marked successful", "provider", candidate.ProviderName, "model", candidate.ProviderModel, "requested_model", candidate.RequestedModel)
 	}
 }
 
@@ -197,10 +216,16 @@ func (r *StaticRouter) RestoreAvailability(states []AvailabilityState) {
 		r.availability = NewAvailabilityTracker()
 	}
 	r.availability.Restore(states)
+	if r.logger != nil {
+		r.logger.Info("router availability restored", "states", len(states))
+	}
 }
 
 func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.SyntheticModelConfig, requiredModalities []string) ([]RouteCandidate, error) {
 	if synthetic.Strategy != config.SyntheticStrategyFirstAvailable {
+		if r.logger != nil {
+			r.logger.Warn("synthetic model rejected", "model", alias, "strategy", synthetic.Strategy, "reason", "unsupported_strategy")
+		}
 		return nil, &Error{Code: ErrorNoAvailableModel, Message: fmt.Sprintf("synthetic model %q uses unsupported strategy %q", alias, synthetic.Strategy), Param: "model"}
 	}
 
@@ -211,27 +236,45 @@ func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.Synt
 	for _, candidate := range synthetic.Candidates {
 		providerName, providerModel, ok := strings.Cut(candidate, ":")
 		if !ok || providerName == "" || providerModel == "" {
+			if r.logger != nil {
+				r.logger.Warn("synthetic candidate rejected", "synthetic_model", alias, "candidate", candidate, "reason", "invalid_reference")
+			}
 			return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("synthetic model %q contains invalid candidate %q", alias, candidate), Param: "model"}
 		}
 		providerCfg, ok := r.cfg.Providers[providerName]
 		if !ok {
+			if r.logger != nil {
+				r.logger.Warn("synthetic candidate rejected", "synthetic_model", alias, "candidate", candidate, "reason", "unknown_provider", "provider", providerName)
+			}
 			return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("synthetic model %q references unknown provider %q", alias, providerName), Param: "model"}
 		}
 		modelCfg, ok := providerCfg.Models[providerModel]
 		if !ok {
+			if r.logger != nil {
+				r.logger.Warn("synthetic candidate rejected", "synthetic_model", alias, "candidate", candidate, "reason", "unknown_model", "provider", providerName, "model", providerModel)
+			}
 			return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("synthetic model %q references unknown model %q for provider %q", alias, providerModel, providerName), Param: "model"}
 		}
 		if !supportsModalities(modelCfg.Modalities, requiredModalities) {
 			unsupportedModalities++
+			if r.logger != nil {
+				r.logger.Info("synthetic candidate skipped", "synthetic_model", alias, "candidate", candidate, "reason", "unsupported_modality", "required_modalities", requiredModalities, "model_modalities", modelCfg.Modalities)
+			}
 			continue
 		}
 		p, ok := r.providers[providerName]
 		if !ok || p == nil {
 			missingProviders++
+			if r.logger != nil {
+				r.logger.Warn("synthetic candidate skipped", "synthetic_model", alias, "candidate", candidate, "reason", "missing_provider", "provider", providerName)
+			}
 			continue
 		}
 		if r.availability != nil && !r.availability.IsAvailable(providerName, providerModel, time.Now()) {
 			unavailableCandidates++
+			if r.logger != nil {
+				r.logger.Info("synthetic candidate skipped", "synthetic_model", alias, "candidate", candidate, "reason", "unavailable", "provider", providerName, "model", providerModel)
+			}
 			continue
 		}
 		candidates = append(candidates, RouteCandidate{
@@ -241,6 +284,9 @@ func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.Synt
 			Synthetic:      true,
 			Provider:       p,
 		})
+		if r.logger != nil {
+			r.logger.Info("synthetic candidate accepted", "synthetic_model", alias, "candidate", candidate, "provider", providerName, "model", providerModel)
+		}
 	}
 	if len(candidates) == 0 {
 		code := ErrorUnknownModel
@@ -251,7 +297,13 @@ func (r *StaticRouter) resolveSyntheticModel(alias string, synthetic config.Synt
 		} else if missingProviders > 0 || unavailableCandidates > 0 {
 			code = ErrorNoAvailableModel
 		}
+		if r.logger != nil {
+			r.logger.Warn("synthetic model has no available candidates", "model", alias, "reason", message, "unsupported_modalities", unsupportedModalities, "missing_providers", missingProviders, "unavailable_candidates", unavailableCandidates)
+		}
 		return nil, &Error{Code: code, Message: message, Param: "model"}
+	}
+	if r.logger != nil {
+		r.logger.Info("synthetic model resolved", "model", alias, "candidates", len(candidates))
 	}
 	return candidates, nil
 }
@@ -260,20 +312,35 @@ func (r *StaticRouter) resolveProviderModel(providerName, providerModel, request
 	providerName = strings.TrimSpace(providerName)
 	providerModel = strings.TrimSpace(providerModel)
 	if providerName == "" || providerModel == "" {
+		if r.logger != nil {
+			r.logger.Info("provider-qualified model rejected", "requested_model", requestedModel, "reason", "empty_provider_or_model")
+		}
 		return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("unknown model %q", requestedModel), Param: "model"}
 	}
 	providerCfg, ok := r.cfg.Providers[providerName]
 	if !ok {
+		if r.logger != nil {
+			r.logger.Warn("provider-qualified model rejected", "requested_model", requestedModel, "provider", providerName, "reason", "unknown_provider")
+		}
 		return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("unknown provider %q for model %q", providerName, requestedModel), Param: "model"}
 	}
 	modelCfg, ok := providerCfg.Models[providerModel]
 	if !ok {
+		if r.logger != nil {
+			r.logger.Warn("provider-qualified model rejected", "requested_model", requestedModel, "provider", providerName, "model", providerModel, "reason", "unknown_model")
+		}
 		return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("unknown model %q for provider %q", providerModel, providerName), Param: "model"}
 	}
 	if !supportsModalities(modelCfg.Modalities, requiredModalities) {
+		if r.logger != nil {
+			r.logger.Warn("provider-qualified model rejected", "requested_model", requestedModel, "provider", providerName, "model", providerModel, "reason", "unsupported_modality", "required_modalities", requiredModalities, "model_modalities", modelCfg.Modalities)
+		}
 		return nil, &Error{Code: ErrorUnsupportedModality, Message: fmt.Sprintf("model %q for provider %q does not support requested modalities", providerModel, providerName), Param: "model"}
 	}
 	if r.availability != nil && !r.availability.IsAvailable(providerName, providerModel, time.Now()) {
+		if r.logger != nil {
+			r.logger.Info("provider-qualified model rejected", "requested_model", requestedModel, "provider", providerName, "model", providerModel, "reason", "unavailable")
+		}
 		return nil, &Error{Code: ErrorNoAvailableModel, Message: fmt.Sprintf("model %q for provider %q is temporarily unavailable", providerModel, providerName), Param: "model"}
 	}
 	return r.candidate(providerName, providerModel, requestedModel)
@@ -293,19 +360,37 @@ func (r *StaticRouter) resolveDirectModel(model string, requiredModalities []str
 		foundModel = true
 		if !supportsModalities(modelCfg.Modalities, requiredModalities) {
 			unsupportedModalities++
+			if r.logger != nil {
+				r.logger.Info("direct model candidate skipped", "model", model, "provider", providerName, "reason", "unsupported_modality", "required_modalities", requiredModalities, "model_modalities", modelCfg.Modalities)
+			}
 			continue
 		}
 		if r.availability != nil && !r.availability.IsAvailable(providerName, model, time.Now()) {
 			unavailableCandidates++
+			if r.logger != nil {
+				r.logger.Info("direct model candidate skipped", "model", model, "provider", providerName, "reason", "unavailable")
+			}
 			continue
+		}
+		if r.logger != nil {
+			r.logger.Info("direct model resolved", "model", model, "provider", providerName)
 		}
 		return r.candidate(providerName, model, model)
 	}
 	if foundModel && unsupportedModalities > 0 {
+		if r.logger != nil {
+			r.logger.Warn("direct model rejected", "model", model, "reason", "unsupported_modality", "unsupported_candidates", unsupportedModalities)
+		}
 		return nil, &Error{Code: ErrorUnsupportedModality, Message: fmt.Sprintf("model %q does not support requested modalities", model), Param: "model"}
 	}
 	if foundModel && unavailableCandidates > 0 {
+		if r.logger != nil {
+			r.logger.Info("direct model rejected", "model", model, "reason", "unavailable", "unavailable_candidates", unavailableCandidates)
+		}
 		return nil, &Error{Code: ErrorNoAvailableModel, Message: fmt.Sprintf("model %q is temporarily unavailable", model), Param: "model"}
+	}
+	if r.logger != nil {
+		r.logger.Info("model not found", "model", model)
 	}
 	return nil, &Error{Code: ErrorUnknownModel, Message: fmt.Sprintf("unknown model %q", model), Param: "model"}
 }
@@ -313,16 +398,23 @@ func (r *StaticRouter) resolveDirectModel(model string, requiredModalities []str
 func (r *StaticRouter) candidate(providerName, providerModel, requestedModel string) ([]RouteCandidate, error) {
 	p, ok := r.providers[providerName]
 	if !ok || p == nil {
+		if r.logger != nil {
+			r.logger.Warn("candidate rejected", "provider", providerName, "model", providerModel, "requested_model", requestedModel, "reason", "missing_provider")
+		}
 		return nil, &Error{Code: ErrorNoAvailableModel, Message: fmt.Sprintf("no available provider for model %q", requestedModel), Param: "model"}
 	}
-	return []RouteCandidate{
+	candidates := []RouteCandidate{
 		{
 			ProviderName:   providerName,
 			ProviderModel:  providerModel,
 			RequestedModel: requestedModel,
 			Provider:       p,
 		},
-	}, nil
+	}
+	if r.logger != nil {
+		r.logger.Info("route candidate selected", "provider", providerName, "model", providerModel, "requested_model", requestedModel)
+	}
+	return candidates, nil
 }
 
 func supportsModalities(configured []string, required []string) bool {

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"battle-proxy-akira/internal/config"
@@ -24,6 +25,7 @@ type serverOptions struct {
 	requestLogger   requestlog.Logger
 	maxBodyBytes    int64
 	metrics         *metrics.Collector
+	logger          *slog.Logger
 }
 
 // WithModelLister configures the source used by GET /v1/models.
@@ -78,6 +80,13 @@ func WithMetrics(collector *metrics.Collector) Option {
 	}
 }
 
+// WithLogger configures optional verbose diagnostics.
+func WithLogger(logger *slog.Logger) Option {
+	return func(opts *serverOptions) {
+		opts.logger = logger
+	}
+}
+
 // NewServer builds the HTTP handler tree for the proxy API.
 func NewServer(options ...Option) http.Handler {
 	opts := serverOptions{
@@ -115,6 +124,10 @@ func NewServer(options ...Option) http.Handler {
 	handler := http.Handler(mux)
 	if opts.metrics != nil {
 		handler = metricsMiddleware(opts.metrics, handler)
+	}
+	if opts.logger != nil {
+		opts.logger.Info("api routes registered", "routes", []string{"/healthz", "/readyz", "/metrics", "/v1/models", "/v1/chat/completions", "/v1/responses"})
+		opts.logger.Info("api middleware configured", "client_auth", opts.clientAuth != nil, "request_logger", opts.requestLogger != requestlog.NoopLogger{}, "metrics", opts.metrics != nil, "max_body_bytes", opts.maxBodyBytes)
 	}
 	return requestIDMiddleware(handler)
 }
