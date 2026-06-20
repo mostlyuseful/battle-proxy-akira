@@ -131,6 +131,18 @@ func WriteEvent(w io.Writer, event Event) error {
 	return WriteData(w, event.Data)
 }
 
+// WriteTypedEvent writes a named SSE event with an event: line followed by the
+// data payload, flushing when w supports http.Flusher. Used for Responses API
+// semantic streaming events (e.g. response.created).
+func WriteTypedEvent(w io.Writer, eventType, data string) error {
+	if eventType != "" {
+		if _, err := fmt.Fprintf(w, "event: %s\n", eventType); err != nil {
+			return err
+		}
+	}
+	return WriteData(w, data)
+}
+
 // WriteDone writes the OpenAI-compatible stream terminator event.
 func WriteDone(w io.Writer) error {
 	return WriteData(w, DoneData)

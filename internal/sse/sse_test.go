@@ -146,3 +146,32 @@ func (w *flushRecorder) Write(p []byte) (int, error) {
 	return w.builder.Write(p)
 }
 func (w *flushRecorder) Flush() { w.flushes++ }
+
+func TestWriteTypedEventWritesEventAndDataLines(t *testing.T) {
+	t.Parallel()
+
+	w := &flushRecorder{header: http.Header{}}
+	if err := WriteTypedEvent(w, "response.created", `{"type":"response.created"}`); err != nil {
+		t.Fatalf("WriteTypedEvent: %v", err)
+	}
+	got := w.builder.String()
+	want := "event: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+	if got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if w.flushes != 1 {
+		t.Fatalf("flushes = %d, want 1", w.flushes)
+	}
+}
+
+func TestWriteTypedEventEmptyTypeOmitsEventLine(t *testing.T) {
+	t.Parallel()
+
+	w := &flushRecorder{header: http.Header{}}
+	if err := WriteTypedEvent(w, "", "hello"); err != nil {
+		t.Fatalf("WriteTypedEvent: %v", err)
+	}
+	if got := w.builder.String(); got != "data: hello\n\n" {
+		t.Fatalf("output = %q, want data only", got)
+	}
+}
