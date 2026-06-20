@@ -78,3 +78,10 @@
 - Decision: expose a small `ModelLister` interface consumed by the API layer, register `/v1/models` in `NewServer`, and apply an optional `Middleware` hook to client API routes so the later client-auth task can plug in consistently. Return `{object:"list", data:[...]}` with each model as `{id, object:"model", created:0, owned_by}`; direct models use their provider name as `owned_by`, synthetic/unknown-owner models use `proxy`.
 - Rejected alternatives: hard-wiring the router concrete type into API handlers, because a small interface is easier to test and replace; blocking this endpoint on the future client-auth implementation, because the middleware hook preserves the integration point without expanding scope.
 - Affected area: `/v1/models`, server construction options, future client-auth middleware, and API/router integration.
+
+### Client bearer auth middleware behavior
+
+- Context: `auth.client-bearer` required `none` and `static_bearer`, while the spec/config examples also use `bearer_tokens`, and token parsing/error redaction details were not fully specified.
+- Decision: implement reusable API middleware that treats `static_bearer` and existing `bearer_tokens` as equivalent comma-separated env-var token modes. `none` is an identity middleware for local/dev configs. Missing or invalid client `Authorization: Bearer` headers return OpenAI-style `policy_denied` errors with `WWW-Authenticate`, and middleware construction errors avoid including token values or env var names.
+- Rejected alternatives: supporting only `static_bearer`, because existing config validation/spec examples already allow `bearer_tokens`; logging or echoing env var names in auth setup errors, because names can reveal deployment secret conventions and are not necessary for runtime client errors.
+- Affected area: API client-auth integration, server construction, `/v1/models`, and future chat/responses endpoints.
