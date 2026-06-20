@@ -1,18 +1,17 @@
 ---
 id: project.bootstrap
 title: Go module and server skeleton
-status: active
+status: done
 priority: p0
 domain: project
 slice: bootable-proxy-foundation
-depends_on:
-  []
+depends_on: []
 tags:
-  - go
-  - server
-  - foundation
+- go
+- server
+- foundation
 context_files:
-  - docs/spec.md
+- docs/spec.md
 ---
 
 # Go module and server skeleton
@@ -23,11 +22,11 @@ Create the minimal Go project structure and a bootable HTTP server with health e
 
 ## Acceptance Criteria
 
-- [ ] Initialize a Go module for the proxy.
-- [ ] Create the planned package skeleton under cmd/llm-proxy and internal/* where immediately needed.
-- [ ] Implement GET /healthz returning a successful health response.
-- [ ] Implement GET /readyz returning a successful readiness response.
-- [ ] Add basic tests or build checks showing the server compiles and endpoints are wired.
+- [x] Initialize a Go module for the proxy.
+- [x] Create the planned package skeleton under cmd/llm-proxy and internal/* where immediately needed.
+- [x] Implement GET /healthz returning a successful health response.
+- [x] Implement GET /readyz returning a successful readiness response.
+- [x] Add basic tests or build checks showing the server compiles and endpoints are wired.
 
 ## Context
 
@@ -42,3 +41,5 @@ Use stdlib net/http and avoid framework dependencies. Keep the skeleton small an
 ## Notes
 
 This is the first task and should leave the repo buildable.
+
+Completed with a stdlib `net/http` server, `/healthz` and `/readyz` handlers, and `go test ./...` coverage for endpoint wiring.
