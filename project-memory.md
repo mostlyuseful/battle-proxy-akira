@@ -29,3 +29,10 @@
 - Decision: keep the IR provider-neutral and minimal: non-streaming `Response` has one assistant `Message`, finish reason, optional usage, metadata, and raw body; streaming `Event` carries a generic type, optional delta/text, finish reason, usage, error, metadata, and raw JSON; `Model` carries ID/provider/name/modalities/synthetic metadata. Request also includes `Extra map[string]json.RawMessage` alongside `RawBody` for unknown provider-compatible fields.
 - Rejected alternatives: mirroring OpenAI Chat Completions choices/chunks directly in the IR, because that would leak edge API shape into provider interfaces and make future Responses/non-OpenAI adapters harder.
 - Affected area: provider interface implementations, OpenAI translation, routing modality checks, and logging metadata.
+
+### Chat Completions MVP parsing scope
+
+- Context: `openai.chat-types` needed request/response structs and text normalization, while image content parts are explicitly a later task and OpenAI allows `stop` as either a string or array.
+- Decision: parse Chat Completions with custom stdlib JSON types that preserve raw body and unknown top-level/message fields; support simple string `content` only for now and return a clear decode error for multimodal content arrays; normalize `stop` string or array into IR `[]string`; provide minimal non-streaming response structs and IR-to-Chat response conversion.
+- Rejected alternatives: accepting and partially ignoring multimodal content arrays before modality support exists, because that could silently drop images; modeling every OpenAI request/response field now, because unknown fields can be preserved without expanding MVP scope.
+- Affected area: OpenAI edge parsing, future image content parsing, provider request forwarding, and Chat Completions response rendering.
