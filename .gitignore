@@ -1,2 +1,3 @@
 /llm-proxy
 config.json
+*.jsonl

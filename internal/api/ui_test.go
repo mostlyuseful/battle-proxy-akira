@@ -15,24 +15,27 @@ import (
 func TestUIPageServesHTML(t *testing.T) {
 	t.Parallel()
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/ui", nil)
-	NewServer().ServeHTTP(rec, req)
+	for _, path := range []string{"/", "/ui"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		NewServer().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusOK)
-	}
-	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "text/html") {
-		t.Fatalf("content-type = %q", got)
-	}
-	if !strings.Contains(rec.Body.String(), "llm-proxy UI") {
-		t.Fatalf("body = %q", rec.Body.String())
-	}
-	for _, want := range []string{"log-card", "renderSummary", "Transcript"} {
-		if !strings.Contains(rec.Body.String(), want) {
-			t.Fatalf("body missing %q in %q", want, rec.Body.String())
+		if rec.Code != http.StatusOK {
+			t.Fatalf("path %s status code = %d, want %d", path, rec.Code, http.StatusOK)
+		}
+		if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "text/html") {
+			t.Fatalf("path %s content-type = %q", path, got)
+		}
+		if !strings.Contains(rec.Body.String(), "llm-proxy UI") {
+			t.Fatalf("path %s body = %q", path, rec.Body.String())
+		}
+		for _, want := range []string{"log-card", "renderSummary", "Transcript", "tab-logs", "tab-models", "activateTab('logs')"} {
+			if !strings.Contains(rec.Body.String(), want) {
+				t.Fatalf("path %s body missing %q in %q", path, want, rec.Body.String())
+			}
 		}
 	}
+
 }
 
 func TestUILogsEndpointRequiresClientAuth(t *testing.T) {

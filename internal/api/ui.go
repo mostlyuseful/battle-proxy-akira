@@ -23,6 +23,11 @@ const uiHTML = `<!doctype html>
     th, td { border: 1px solid #ccc; padding: 6px; text-align: left; }
     .row { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
     .panel { margin-top: 20px; }
+    .tabs { display: flex; gap: 8px; margin-top: 16px; }
+    .tab-button { padding: 6px 10px; border: 1px solid #ccc; background: #f5f5f5; cursor: pointer; }
+    .tab-button.active { background: #ddd; font-weight: bold; }
+    .tab-panel { display: none; margin-top: 16px; }
+    .tab-panel.active { display: block; }
     .log-list { display: flex; flex-direction: column; gap: 10px; }
     details.log-card { border: 1px solid #ccc; border-radius: 6px; padding: 8px 10px; }
     details.log-card summary { cursor: pointer; }
@@ -42,17 +47,26 @@ const uiHTML = `<!doctype html>
     <span id="status"></span>
   </div>
 
-  <div class="panel">
-    <h2>Models</h2>
-    <table>
-      <thead><tr><th>ID</th><th>Owner</th></tr></thead>
-      <tbody id="models"></tbody>
-    </table>
+  <div class="tabs">
+    <button id="tab-logs" class="tab-button active" type="button">Logs</button>
+    <button id="tab-models" class="tab-button" type="button">Models</button>
   </div>
 
-  <div class="panel">
-    <h2>Logs</h2>
-    <div id="logs" class="log-list"></div>
+  <div id="panel-logs" class="tab-panel active">
+    <div class="panel">
+      <h2>Logs</h2>
+      <div id="logs" class="log-list"></div>
+    </div>
+  </div>
+
+  <div id="panel-models" class="tab-panel">
+    <div class="panel">
+      <h2>Models</h2>
+      <table>
+        <thead><tr><th>ID</th><th>Owner</th></tr></thead>
+        <tbody id="models"></tbody>
+      </table>
+    </div>
   </div>
 
 <script>
@@ -61,6 +75,10 @@ const statusEl = document.getElementById('status');
 const modelsEl = document.getElementById('models');
 const logsEl = document.getElementById('logs');
 const pollEl = document.getElementById('poll');
+const tabLogsEl = document.getElementById('tab-logs');
+const tabModelsEl = document.getElementById('tab-models');
+const panelLogsEl = document.getElementById('panel-logs');
+const panelModelsEl = document.getElementById('panel-models');
 let pollTimer = null;
 
 function headers() {
@@ -160,6 +178,17 @@ function renderSummary(record) {
   return '<div class="log-summary">' + bits.join('') + '</div>';
 }
 
+function activateTab(name) {
+  const showLogs = name === 'logs';
+  tabLogsEl.classList.toggle('active', showLogs);
+  tabModelsEl.classList.toggle('active', !showLogs);
+  panelLogsEl.classList.toggle('active', showLogs);
+  panelModelsEl.classList.toggle('active', !showLogs);
+}
+
+tabLogsEl.onclick = () => activateTab('logs');
+tabModelsEl.onclick = () => activateTab('models');
+
 document.getElementById('load-models').onclick = () => loadModels().catch(err => setStatus(err.message));
 document.getElementById('load-logs').onclick = () => loadLogs(true).catch(err => setStatus(err.message));
 pollEl.onchange = () => {
@@ -185,10 +214,12 @@ func RegisterUIRoutes(mux *http.ServeMux, clientAuth Middleware, loggingCfg conf
 	if clientAuth == nil {
 		clientAuth = identityMiddleware
 	}
-	mux.HandleFunc("GET /ui", func(w http.ResponseWriter, r *http.Request) {
+	serveUI := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(uiHTML))
-	})
+	}
+	mux.HandleFunc("GET /", serveUI)
+	mux.HandleFunc("GET /ui", serveUI)
 	mux.Handle("GET /ui/api/logs", clientAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !loggingCfg.Enabled || strings.TrimSpace(loggingCfg.Path) == "" {
 			writeJSON(w, http.StatusOK, logsResponse{Enabled: false})
