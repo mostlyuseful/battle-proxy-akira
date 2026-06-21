@@ -1,7 +1,7 @@
 .PHONY: build run
 
 build:
-	go build ./cmd/llm-proxy
+	go build -trimpath ./cmd/llm-proxy
 
 run: build
 	./llm-proxy
