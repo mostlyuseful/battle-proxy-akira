@@ -37,6 +37,34 @@ func redactValue(v any) any {
 		return nil
 	case string:
 		return RedactString(value)
+	case bool:
+		return value
+	case float64:
+		return value
+	case float32:
+		return value
+	case int:
+		return value
+	case int8:
+		return value
+	case int16:
+		return value
+	case int32:
+		return value
+	case int64:
+		return value
+	case uint:
+		return value
+	case uint8:
+		return value
+	case uint16:
+		return value
+	case uint32:
+		return value
+	case uint64:
+		return value
+	case json.Number:
+		return value
 	case json.RawMessage:
 		return redactJSON(value)
 	case []byte:

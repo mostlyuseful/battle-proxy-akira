@@ -190,6 +190,31 @@ func TestJSONLLoggerWritesInvasiveTranscriptAndRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestRedactRecordHandlesBooleanAndNumericTranscriptFields(t *testing.T) {
+	t.Parallel()
+
+	rec := RedactRecord(RequestLogRecord{
+		Transcript: json.RawMessage(`{"ok":true,"count":2,"nested":{"token":"Bearer secret-token"}}`),
+	})
+	transcript, ok := rec.Transcript.(map[string]any)
+	if !ok {
+		t.Fatalf("transcript type = %T, want map[string]any", rec.Transcript)
+	}
+	if got, ok := transcript["ok"].(bool); !ok || !got {
+		t.Fatalf("ok field = %#v", transcript["ok"])
+	}
+	if got, ok := transcript["count"].(float64); !ok || got != 2 {
+		t.Fatalf("count field = %#v", transcript["count"])
+	}
+	nested, ok := transcript["nested"].(map[string]any)
+	if !ok {
+		t.Fatalf("nested field = %#v", transcript["nested"])
+	}
+	if strings.Contains(nested["token"].(string), "secret-token") {
+		t.Fatalf("nested token was not redacted: %#v", nested)
+	}
+}
+
 func TestJSONLLoggerRedactsSecretLikeMetadata(t *testing.T) {
 	t.Parallel()
 
