@@ -23,6 +23,7 @@ type serverOptions struct {
 	responsesRouter router.Router
 	clientAuth      Middleware
 	requestLogger   requestlog.Logger
+	loggingConfig   config.LoggingConfig
 	maxBodyBytes    int64
 	metrics         *metrics.Collector
 	logger          *slog.Logger
@@ -61,6 +62,13 @@ func WithClientAuth(middleware Middleware) Option {
 func WithRequestLogger(logger requestlog.Logger) Option {
 	return func(opts *serverOptions) {
 		opts.requestLogger = logger
+	}
+}
+
+// WithLoggingConfig configures logging-related UI behavior.
+func WithLoggingConfig(cfg config.LoggingConfig) Option {
+	return func(opts *serverOptions) {
+		opts.loggingConfig = cfg
 	}
 }
 
@@ -121,6 +129,7 @@ func NewServer(options ...Option) http.Handler {
 	RegisterModelRoutes(mux, opts.modelLister, opts.clientAuth, opts.logger)
 	RegisterChatRoutes(mux, opts.chatRouter, opts.clientAuth, opts.requestLogger, opts.maxBodyBytes, opts.logger)
 	RegisterResponsesRoutes(mux, responsesRouter, opts.clientAuth, opts.requestLogger, opts.maxBodyBytes, opts.logger)
+	RegisterUIRoutes(mux, opts.clientAuth, opts.loggingConfig)
 	handler := http.Handler(mux)
 	if opts.metrics != nil {
 		handler = metricsMiddleware(opts.metrics, handler)

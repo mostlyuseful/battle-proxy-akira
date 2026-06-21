@@ -91,6 +91,7 @@ func main() {
 		api.WithModelLister(api.ModelListerFunc(manager.Models)),
 		api.WithClientAuth(clientAuth),
 		api.WithRequestLogger(logger),
+		api.WithLoggingConfig(cfg.Logging),
 		api.WithServerConfig(cfg.Server),
 		api.WithMetrics(metricsCollector),
 	}
