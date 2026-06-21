@@ -29,7 +29,7 @@ func TestUIPageServesHTML(t *testing.T) {
 		if !strings.Contains(rec.Body.String(), "llm-proxy UI") {
 			t.Fatalf("path %s body = %q", path, rec.Body.String())
 		}
-		for _, want := range []string{"log-card", "renderSummary", "renderChatLite", "raw-json", "tab-logs", "tab-models", "activateTab('logs')", "modelsLoaded = false", "!showLogs && !modelsLoaded"} {
+		for _, want := range []string{"log-card", "renderSummary", "renderChatLite", "raw-json", "tab-logs", "tab-models", "activateTab('logs')", "modelsLoaded = false", "!showLogs && !modelsLoaded", "remember-token", "restoreRememberedToken", "persistRememberedToken", "localStorage"} {
 			if !strings.Contains(rec.Body.String(), want) {
 				t.Fatalf("path %s body missing %q in %q", path, want, rec.Body.String())
 			}

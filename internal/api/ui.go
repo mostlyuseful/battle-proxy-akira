@@ -47,6 +47,7 @@ const uiHTML = `<!doctype html>
   <h1>llm-proxy UI</h1>
   <div class="row">
     <label>Bearer token <input id="token" type="password" size="40" placeholder="sk-..."></label>
+    <label><input id="remember-token" type="checkbox"> Remember token on this browser</label>
     <button id="load-models">Load models</button>
     <button id="load-logs">Load logs</button>
     <label><input id="poll" type="checkbox" checked> poll logs</label>
@@ -77,6 +78,7 @@ const uiHTML = `<!doctype html>
 
 <script>
 const tokenEl = document.getElementById('token');
+const rememberTokenEl = document.getElementById('remember-token');
 const statusEl = document.getElementById('status');
 const modelsEl = document.getElementById('models');
 const logsEl = document.getElementById('logs');
@@ -87,12 +89,32 @@ const panelLogsEl = document.getElementById('panel-logs');
 const panelModelsEl = document.getElementById('panel-models');
 let pollTimer = null;
 let modelsLoaded = false;
+const rememberedTokenKey = 'llm_proxy_ui_token';
+const rememberTokenFlagKey = 'llm_proxy_ui_remember_token';
 
 function headers() {
   const token = tokenEl.value.trim();
   return token ? { Authorization: 'Bearer ' + token } : {};
 }
 function setStatus(msg) { statusEl.textContent = msg; }
+
+function restoreRememberedToken() {
+  const remember = localStorage.getItem(rememberTokenFlagKey) === 'true';
+  rememberTokenEl.checked = remember;
+  if (remember) {
+    tokenEl.value = localStorage.getItem(rememberedTokenKey) || '';
+  }
+}
+
+function persistRememberedToken() {
+  if (rememberTokenEl.checked) {
+    localStorage.setItem(rememberTokenFlagKey, 'true');
+    localStorage.setItem(rememberedTokenKey, tokenEl.value);
+  } else {
+    localStorage.removeItem(rememberTokenFlagKey);
+    localStorage.removeItem(rememberedTokenKey);
+  }
+}
 
 async function loadModels() {
   setStatus('loading models...');
@@ -293,6 +315,10 @@ function activateTab(name) {
 
 tabLogsEl.onclick = () => activateTab('logs');
 tabModelsEl.onclick = () => activateTab('models');
+rememberTokenEl.onchange = () => persistRememberedToken();
+tokenEl.oninput = () => {
+  if (rememberTokenEl.checked) persistRememberedToken();
+};
 
 document.getElementById('load-models').onclick = () => loadModels().catch(err => setStatus(err.message));
 document.getElementById('load-logs').onclick = () => loadLogs(true).catch(err => setStatus(err.message));
@@ -302,6 +328,7 @@ pollEl.onchange = () => {
     pollTimer = setInterval(() => loadLogs(false).catch(err => setStatus(err.message)), 3000);
   }
 };
+restoreRememberedToken();
 pollEl.onchange();
 </script>
 </body>
