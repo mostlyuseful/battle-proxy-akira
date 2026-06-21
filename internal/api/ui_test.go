@@ -28,6 +28,11 @@ func TestUIPageServesHTML(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "llm-proxy UI") {
 		t.Fatalf("body = %q", rec.Body.String())
 	}
+	for _, want := range []string{"log-card", "renderSummary", "Transcript"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("body missing %q in %q", want, rec.Body.String())
+		}
+	}
 }
 
 func TestUILogsEndpointRequiresClientAuth(t *testing.T) {

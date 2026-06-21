@@ -23,6 +23,13 @@ const uiHTML = `<!doctype html>
     th, td { border: 1px solid #ccc; padding: 6px; text-align: left; }
     .row { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
     .panel { margin-top: 20px; }
+    .log-list { display: flex; flex-direction: column; gap: 10px; }
+    details.log-card { border: 1px solid #ccc; border-radius: 6px; padding: 8px 10px; }
+    details.log-card summary { cursor: pointer; }
+    .log-summary { display: flex; gap: 12px; flex-wrap: wrap; }
+    .log-summary span { white-space: nowrap; }
+    .log-detail { margin-top: 10px; }
+    .log-detail h4 { margin: 10px 0 6px; }
   </style>
 </head>
 <body>
@@ -45,7 +52,7 @@ const uiHTML = `<!doctype html>
 
   <div class="panel">
     <h2>Logs</h2>
-    <pre id="logs"></pre>
+    <div id="logs" class="log-list"></div>
   </div>
 
 <script>
@@ -85,12 +92,11 @@ async function loadLogs(reset = false) {
   const body = await res.json();
   if (!res.ok) throw new Error(body.error?.message || body.error || 'logs failed');
   if (reset) {
-    logsEl.textContent = '';
+    logsEl.innerHTML = '';
   }
   const lines = body.lines || [];
-  if (lines.length > 0) {
-    logsEl.textContent += (logsEl.textContent ? '\n' : '') + lines.join('\n');
-    logsEl.scrollTop = logsEl.scrollHeight;
+  for (const line of lines) {
+    appendLogLine(line);
   }
   logCursor = body.cursor || 0;
   setStatus(body.enabled ? ('logs loaded (' + lines.length + ' new)') : 'logging disabled');
@@ -98,6 +104,60 @@ async function loadLogs(reset = false) {
 
 function escapeHTML(s) {
   return String(s ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+function appendLogLine(line) {
+  let record;
+  try {
+    record = JSON.parse(line);
+  } catch {
+    const pre = document.createElement('pre');
+    pre.textContent = line;
+    logsEl.appendChild(pre);
+    return;
+  }
+
+  const details = document.createElement('details');
+  details.className = 'log-card';
+  const summary = document.createElement('summary');
+  summary.innerHTML = renderSummary(record);
+  details.appendChild(summary);
+
+  const detail = document.createElement('div');
+  detail.className = 'log-detail';
+  if (record.transcript) {
+    const title = document.createElement('h4');
+    title.textContent = 'Transcript';
+    detail.appendChild(title);
+    const transcriptPre = document.createElement('pre');
+    transcriptPre.textContent = JSON.stringify(record.transcript, null, 2);
+    detail.appendChild(transcriptPre);
+  }
+  const rawTitle = document.createElement('h4');
+  rawTitle.textContent = 'Raw JSON';
+  detail.appendChild(rawTitle);
+  const rawPre = document.createElement('pre');
+  rawPre.textContent = JSON.stringify(record, null, 2);
+  detail.appendChild(rawPre);
+  details.appendChild(detail);
+  logsEl.appendChild(details);
+}
+
+function renderSummary(record) {
+  const bits = [];
+  bits.push('<span><strong>' + escapeHTML(record.ts || '') + '</strong></span>');
+  bits.push('<span>' + escapeHTML(record.endpoint || '') + '</span>');
+  bits.push('<span>' + escapeHTML(record.requested_model || '') + '</span>');
+  if (record.resolved_provider || record.resolved_model) {
+    bits.push('<span>' + escapeHTML((record.resolved_provider || '') + ':' + (record.resolved_model || '')) + '</span>');
+  }
+  bits.push('<span>status=' + escapeHTML(record.status ?? '') + '</span>');
+  bits.push('<span>latency=' + escapeHTML(record.latency_ms ?? '') + 'ms</span>');
+  bits.push('<span>request=' + escapeHTML(record.request_id || '') + '</span>');
+  if (record.session_id) {
+    bits.push('<span>session=' + escapeHTML(record.session_id) + '</span>');
+  }
+  return '<div class="log-summary">' + bits.join('') + '</div>';
 }
 
 document.getElementById('load-models').onclick = () => loadModels().catch(err => setStatus(err.message));
