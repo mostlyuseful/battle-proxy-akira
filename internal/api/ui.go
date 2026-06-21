@@ -35,6 +35,12 @@ const uiHTML = `<!doctype html>
     .log-summary span { white-space: nowrap; }
     .log-detail { margin-top: 10px; }
     .log-detail h4 { margin: 10px 0 6px; }
+    .chat-lite { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+    .bubble { max-width: 80%; padding: 8px 10px; border-radius: 12px; white-space: pre-wrap; }
+    .bubble.user { align-self: flex-end; background: #dff1ff; }
+    .bubble.assistant { align-self: flex-start; background: #ececec; }
+    .bubble.system { align-self: center; background: #f6e7c8; }
+    details.raw-json { margin-top: 10px; }
   </style>
 </head>
 <body>
@@ -80,6 +86,7 @@ const tabModelsEl = document.getElementById('tab-models');
 const panelLogsEl = document.getElementById('panel-logs');
 const panelModelsEl = document.getElementById('panel-models');
 let pollTimer = null;
+let modelsLoaded = false;
 
 function headers() {
   const token = tokenEl.value.trim();
@@ -98,6 +105,7 @@ async function loadModels() {
     tr.innerHTML = '<td>' + escapeHTML(model.id) + '</td><td>' + escapeHTML(model.owned_by) + '</td>';
     modelsEl.appendChild(tr);
   }
+  modelsLoaded = true;
   setStatus('models loaded');
 }
 
@@ -143,22 +151,116 @@ function appendLogLine(line) {
 
   const detail = document.createElement('div');
   detail.className = 'log-detail';
-  if (record.transcript) {
+
+  const chatLite = renderChatLite(record);
+  if (chatLite) {
     const title = document.createElement('h4');
-    title.textContent = 'Transcript';
+    title.textContent = 'Chat-lite';
     detail.appendChild(title);
-    const transcriptPre = document.createElement('pre');
-    transcriptPre.textContent = JSON.stringify(record.transcript, null, 2);
-    detail.appendChild(transcriptPre);
+    detail.appendChild(chatLite);
   }
-  const rawTitle = document.createElement('h4');
-  rawTitle.textContent = 'Raw JSON';
-  detail.appendChild(rawTitle);
+
+  const rawDetails = document.createElement('details');
+  rawDetails.className = 'raw-json';
+  const rawSummary = document.createElement('summary');
+  rawSummary.textContent = 'Raw JSON';
+  rawDetails.appendChild(rawSummary);
   const rawPre = document.createElement('pre');
   rawPre.textContent = JSON.stringify(record, null, 2);
-  detail.appendChild(rawPre);
+  rawDetails.appendChild(rawPre);
+  detail.appendChild(rawDetails);
   details.appendChild(detail);
   logsEl.appendChild(details);
+}
+
+function renderChatLite(record) {
+  const transcript = record.transcript;
+  if (!transcript || typeof transcript !== 'object') {
+    return null;
+  }
+
+  const root = document.createElement('div');
+  root.className = 'chat-lite';
+  const request = transcript.request;
+  if (request && Array.isArray(request.messages)) {
+    for (const message of request.messages) {
+      const bubble = renderMessageBubble(message.role || 'user', message.content);
+      if (bubble) root.appendChild(bubble);
+    }
+  }
+
+  const attempts = Array.isArray(transcript.attempts) ? transcript.attempts : [];
+  const streamed = [];
+  for (const attempt of attempts) {
+    if (Array.isArray(attempt.stream)) {
+      for (const chunk of attempt.stream) {
+        const text = extractStreamChunkText(chunk);
+        if (text) streamed.push(text);
+      }
+    }
+    if (attempt.response) {
+      const responseText = extractResponseText(attempt.response);
+      if (responseText) {
+        const bubble = renderMessageBubble('assistant', responseText);
+        if (bubble) root.appendChild(bubble);
+      }
+    }
+  }
+  if (streamed.length > 0) {
+    const bubble = renderMessageBubble('assistant', streamed.join(''));
+    if (bubble) root.appendChild(bubble);
+  }
+
+  return root.childNodes.length > 0 ? root : null;
+}
+
+function renderMessageBubble(role, content) {
+  const text = normalizeContentText(content);
+  if (!text) return null;
+  const div = document.createElement('div');
+  const safeRole = ['user', 'assistant', 'system'].includes(role) ? role : 'assistant';
+  div.className = 'bubble ' + safeRole;
+  div.textContent = text;
+  return div;
+}
+
+function normalizeContentText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map(part => {
+      if (typeof part === 'string') return part;
+      if (part && typeof part.text === 'string') return part.text;
+      if (part && part.type === 'output_text' && typeof part.text === 'string') return part.text;
+      return '';
+    }).filter(Boolean).join('\n');
+  }
+  if (content && typeof content.text === 'string') return content.text;
+  return '';
+}
+
+function extractResponseText(response) {
+  if (!response || typeof response !== 'object') return '';
+  if (Array.isArray(response.choices)) {
+    return response.choices.map(choice => normalizeContentText(choice?.message?.content)).filter(Boolean).join('\n');
+  }
+  if (Array.isArray(response.output)) {
+    const parts = [];
+    for (const item of response.output) {
+      if (Array.isArray(item?.content)) {
+        parts.push(normalizeContentText(item.content));
+      }
+    }
+    return parts.filter(Boolean).join('\n');
+  }
+  return '';
+}
+
+function extractStreamChunkText(chunk) {
+  if (!chunk || typeof chunk !== 'object') return '';
+  if (Array.isArray(chunk.choices)) {
+    return chunk.choices.map(choice => choice?.delta?.content || '').filter(Boolean).join('');
+  }
+  return '';
 }
 
 function renderSummary(record) {
@@ -184,6 +286,9 @@ function activateTab(name) {
   tabModelsEl.classList.toggle('active', !showLogs);
   panelLogsEl.classList.toggle('active', showLogs);
   panelModelsEl.classList.toggle('active', !showLogs);
+  if (!showLogs && !modelsLoaded) {
+    loadModels().catch(err => setStatus(err.message));
+  }
 }
 
 tabLogsEl.onclick = () => activateTab('logs');
