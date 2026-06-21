@@ -45,8 +45,37 @@ func TestModelsEndpointReturnsOpenAICompatibleList(t *testing.T) {
 	if body.Data[0] != (modelResponse{ID: "coding", Object: "model", Created: 0, OwnedBy: "proxy"}) {
 		t.Fatalf("data[0] = %#v", body.Data[0])
 	}
-	if body.Data[1] != (modelResponse{ID: "gpt-test", Object: "model", Created: 0, OwnedBy: "openai_api"}) {
+	if body.Data[1] != (modelResponse{ID: "openai_api:gpt-test", Object: "model", Created: 0, OwnedBy: "openai_api"}) {
 		t.Fatalf("data[1] = %#v", body.Data[1])
+	}
+}
+
+func TestModelsEndpointQualifiesDuplicateProviderModels(t *testing.T) {
+	t.Parallel()
+
+	handler := NewServer(WithModelLister(ModelListerFunc(func(context.Context) ([]ir.Model, error) {
+		return []ir.Model{
+			{ID: "gpt-5.4", Provider: "openai_api", Name: "gpt-5.4"},
+			{ID: "gpt-5.4", Provider: "nanogpt", Name: "gpt-5.4"},
+		}, nil
+	})))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body modelListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Data) != 2 {
+		t.Fatalf("data length = %d, want 2", len(body.Data))
+	}
+	if body.Data[0].ID != "nanogpt:gpt-5.4" || body.Data[1].ID != "openai_api:gpt-5.4" {
+		t.Fatalf("qualified IDs = %#v", body.Data)
 	}
 }
 

@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -425,6 +427,43 @@ func TestChatCompletionsInvasiveLoggingCapturesSessionAndTranscript(t *testing.T
 	transcript, ok := got.Transcript.(*requestlog.Transcript)
 	if !ok || transcript == nil || len(transcript.Attempts) != 1 || len(transcript.Request) == 0 || len(transcript.Attempts[0].Response) == 0 {
 		t.Fatalf("transcript = %#v", got.Transcript)
+	}
+}
+
+func TestChatCompletionsVerboseLoggerEmitsLifecycleEvents(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "upstream-token")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id": "chatcmpl-upstream",
+			"object": "chat.completion",
+			"created": 123,
+			"model": "gpt-test",
+			"choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]
+		}`))
+	}))
+	defer upstream.Close()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	handler := NewServer(
+		WithChatRouter(newTestChatRouter(t, upstream.URL)),
+		WithLogger(logger),
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set(requestIDHeader, "req_verbose_123")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusOK)
+	}
+	logged := buf.String()
+	for _, want := range []string{"request accepted", "request started", "request finished", "req_verbose_123", "chat_completions", "gpt-test", "openai_api"} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("verbose logs missing %q in %s", want, logged)
+		}
 	}
 }
 

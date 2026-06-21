@@ -86,14 +86,18 @@ func main() {
 		slog.Default().Info("request logger configured", "enabled", cfg.Logging.Enabled, "mode", cfg.Logging.Mode, "path", cfg.Logging.Path)
 	}
 
-	handler := api.NewServer(
+	apiOptions := []api.Option{
 		api.WithChatRouter(manager),
 		api.WithModelLister(api.ModelListerFunc(manager.Models)),
 		api.WithClientAuth(clientAuth),
 		api.WithRequestLogger(logger),
 		api.WithServerConfig(cfg.Server),
 		api.WithMetrics(metricsCollector),
-	)
+	}
+	if *verbose {
+		apiOptions = append(apiOptions, api.WithLogger(slog.Default()))
+	}
+	handler := api.NewServer(apiOptions...)
 	if *verbose {
 		slog.Default().Info("api server built", "addr", cfg.Server.Addr, "max_body_bytes", cfg.Server.MaxBodyBytes)
 	}

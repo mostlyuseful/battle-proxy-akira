@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -17,7 +18,7 @@ import (
 )
 
 // RegisterChatRoutes wires Chat Completions endpoints.
-func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth Middleware, logger requestlog.Logger, maxBodyBytes int64) {
+func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth Middleware, logger requestlog.Logger, maxBodyBytes int64, verboseLogger *slog.Logger) {
 	if clientAuth == nil {
 		clientAuth = identityMiddleware
 	}
@@ -31,27 +32,29 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 		r = r.WithContext(ContextWithRequestID(r.Context(), requestID))
 		logRec := newRequestLogRecord(r, "chat_completions", requestID)
 		logRec.Timestamp = started.UTC()
+		logRequestAccepted(verboseLogger, r, requestID, logRec.Endpoint)
 		if chatRouter == nil {
-			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorNoAvailableModel, "no chat completion router configured", "model"))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, logRec, started, NewProxyError(ErrorNoAvailableModel, "no chat completion router configured", "model"))
 			return
 		}
 
 		body, err := readLimitedBody(w, r, maxBodyBytes)
 		if err != nil {
-			writeLoggedOpenAIError(w, r, logger, logRec, started, proxyErrorFromReadBodyError(err))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, logRec, started, proxyErrorFromReadBodyError(err))
 			return
 		}
 		attachRequestTranscript(logger, &logRec, body)
 		chatReq, err := openaiapi.ParseChatCompletionRequest(body)
 		if err != nil {
-			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorInvalidRequest, "invalid Chat Completions request JSON", ""))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, logRec, started, NewProxyError(ErrorInvalidRequest, "invalid Chat Completions request JSON", ""))
 			return
 		}
 		logRec.RequestedModel = chatReq.Model
 		logRec.Stream = chatReq.Stream
+		logRequestStarted(verboseLogger, logRec)
 		irReq, err := chatReq.ToIR()
 		if err != nil {
-			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorInvalidRequest, err.Error(), ""))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, logRec, started, NewProxyError(ErrorInvalidRequest, err.Error(), ""))
 			return
 		}
 		irReq.ID = requestID
@@ -63,24 +66,24 @@ func RegisterChatRoutes(mux *http.ServeMux, chatRouter router.Router, clientAuth
 
 		candidates, err := chatRouter.Resolve(r.Context(), irReq)
 		if err != nil {
-			writeLoggedOpenAIError(w, r, logger, logRec, started, proxyErrorFromRouterError(err))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, logRec, started, proxyErrorFromRouterError(err))
 			return
 		}
 		if len(candidates) == 0 {
-			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorNoAvailableModel, "no available provider for model", "model"))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, logRec, started, NewProxyError(ErrorNoAvailableModel, "no available provider for model", "model"))
 			return
 		}
 
 		if chatReq.Stream {
-			streamChatCompletion(w, r, chatRouter, candidates, irReq, logger, logRec, started)
+			streamChatCompletion(w, r, chatRouter, candidates, irReq, logger, logRec, started, verboseLogger)
 			return
 		}
 
-		completeChatCompletion(w, r, chatRouter, candidates, irReq, logger, logRec, started)
+		completeChatCompletion(w, r, chatRouter, candidates, irReq, logger, logRec, started, verboseLogger)
 	})))
 }
 
-func completeChatCompletion(w http.ResponseWriter, r *http.Request, chatRouter router.Router, candidates []router.RouteCandidate, irReq ir.Request, logger requestlog.Logger, logRec requestlog.RequestLogRecord, started time.Time) {
+func completeChatCompletion(w http.ResponseWriter, r *http.Request, chatRouter router.Router, candidates []router.RouteCandidate, irReq ir.Request, logger requestlog.Logger, logRec requestlog.RequestLogRecord, started time.Time, verboseLogger *slog.Logger) {
 	retryCount := 0
 	for i, candidate := range candidates {
 		attemptLog := logRec
@@ -99,7 +102,7 @@ func completeChatCompletion(w http.ResponseWriter, r *http.Request, chatRouter r
 				retryCount++
 				continue
 			}
-			writeLoggedOpenAIError(w, r, logger, attemptLog, started, proxyErrorFromProviderError(err, "upstream provider request failed"))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, attemptLog, started, proxyErrorFromProviderError(err, "upstream provider request failed"))
 			return
 		}
 		chatRouter.MarkSuccess(candidate)
@@ -112,6 +115,7 @@ func completeChatCompletion(w http.ResponseWriter, r *http.Request, chatRouter r
 		attemptLog.Status = http.StatusOK
 		attemptLog.LatencyMS = time.Since(started).Milliseconds()
 		_ = logger.LogRequest(r.Context(), attemptLog)
+		logRequestFinished(verboseLogger, attemptLog)
 		return
 	}
 }
@@ -136,7 +140,7 @@ func proxyErrorFromReadBodyError(err error) *ProxyError {
 	return NewProxyError(ErrorInvalidRequest, "read request body failed", "")
 }
 
-func streamChatCompletion(w http.ResponseWriter, r *http.Request, chatRouter router.Router, candidates []router.RouteCandidate, irReq ir.Request, logger requestlog.Logger, logRec requestlog.RequestLogRecord, started time.Time) {
+func streamChatCompletion(w http.ResponseWriter, r *http.Request, chatRouter router.Router, candidates []router.RouteCandidate, irReq ir.Request, logger requestlog.Logger, logRec requestlog.RequestLogRecord, started time.Time, verboseLogger *slog.Logger) {
 	retryCount := 0
 candidateLoop:
 	for i, candidate := range candidates {
@@ -156,7 +160,7 @@ candidateLoop:
 				retryCount++
 				continue
 			}
-			writeLoggedOpenAIError(w, r, logger, attemptLog, started, proxyErrorFromProviderError(err, "upstream provider stream failed"))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, attemptLog, started, proxyErrorFromProviderError(err, "upstream provider stream failed"))
 			return
 		}
 
@@ -180,13 +184,14 @@ candidateLoop:
 						retryCount++
 						continue candidateLoop
 					}
-					writeLoggedOpenAIError(w, r, logger, attemptLog, started, NewProxyError(ErrorStreamInterrupted, "upstream provider stream interrupted", ""))
+					writeLoggedOpenAIError(w, r, logger, verboseLogger, attemptLog, started, NewProxyError(ErrorStreamInterrupted, "upstream provider stream interrupted", ""))
 					return
 				}
 				_ = writeStreamInterruptedEvent(w)
 				attemptLog.Status = http.StatusOK
 				attemptLog.LatencyMS = time.Since(started).Milliseconds()
 				_ = logger.LogRequest(r.Context(), attemptLog)
+				logRequestFinished(verboseLogger, attemptLog)
 				return
 			}
 			if !emitted {
@@ -199,6 +204,7 @@ candidateLoop:
 				attemptLog.Status = http.StatusOK
 				attemptLog.LatencyMS = time.Since(started).Milliseconds()
 				_ = logger.LogRequest(r.Context(), attemptLog)
+				logRequestFinished(verboseLogger, attemptLog)
 				return
 			}
 		}
@@ -210,6 +216,7 @@ candidateLoop:
 		attemptLog.Status = http.StatusOK
 		attemptLog.LatencyMS = time.Since(started).Milliseconds()
 		_ = logger.LogRequest(r.Context(), attemptLog)
+		logRequestFinished(verboseLogger, attemptLog)
 		return
 	}
 }
@@ -234,7 +241,7 @@ func writeStreamInterruptedEvent(w http.ResponseWriter) error {
 	return sse.WriteData(w, string(encoded))
 }
 
-func writeLoggedOpenAIError(w http.ResponseWriter, r *http.Request, logger requestlog.Logger, rec requestlog.RequestLogRecord, started time.Time, proxyErr *ProxyError) {
+func writeLoggedOpenAIError(w http.ResponseWriter, r *http.Request, logger requestlog.Logger, verboseLogger *slog.Logger, rec requestlog.RequestLogRecord, started time.Time, proxyErr *ProxyError) {
 	WriteOpenAIError(w, proxyErr)
 	if proxyErr == nil {
 		proxyErr = NewProxyError(ErrorUpstream, "internal proxy error", "")
@@ -243,6 +250,7 @@ func writeLoggedOpenAIError(w http.ResponseWriter, r *http.Request, logger reque
 	rec.Status = proxyErr.StatusCode()
 	rec.LatencyMS = time.Since(started).Milliseconds()
 	_ = logger.LogRequest(r.Context(), rec)
+	logRequestFinished(verboseLogger, rec)
 }
 
 func proxyErrorFromProviderError(err error, fallbackMessage string) *ProxyError {

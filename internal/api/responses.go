@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,7 +17,7 @@ import (
 )
 
 // RegisterResponsesRoutes wires the non-streaming Responses API endpoint.
-func RegisterResponsesRoutes(mux *http.ServeMux, responsesRouter router.Router, clientAuth Middleware, logger requestlog.Logger, maxBodyBytes int64) {
+func RegisterResponsesRoutes(mux *http.ServeMux, responsesRouter router.Router, clientAuth Middleware, logger requestlog.Logger, maxBodyBytes int64, verboseLogger *slog.Logger) {
 	if clientAuth == nil {
 		clientAuth = identityMiddleware
 	}
@@ -30,28 +31,30 @@ func RegisterResponsesRoutes(mux *http.ServeMux, responsesRouter router.Router, 
 		r = r.WithContext(ContextWithRequestID(r.Context(), requestID))
 		logRec := newRequestLogRecord(r, "responses", requestID)
 		logRec.Timestamp = started.UTC()
+		logRequestAccepted(verboseLogger, r, requestID, logRec.Endpoint)
 		if responsesRouter == nil {
-			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorNoAvailableModel, "no responses router configured", "model"))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, logRec, started, NewProxyError(ErrorNoAvailableModel, "no responses router configured", "model"))
 			return
 		}
 
 		body, err := readLimitedBody(w, r, maxBodyBytes)
 		if err != nil {
-			writeLoggedOpenAIError(w, r, logger, logRec, started, proxyErrorFromReadBodyError(err))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, logRec, started, proxyErrorFromReadBodyError(err))
 			return
 		}
 		attachRequestTranscript(logger, &logRec, body)
 		respReq, err := openaiapi.ParseResponseRequest(body)
 		if err != nil {
-			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorInvalidRequest, "invalid Responses request JSON", ""))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, logRec, started, NewProxyError(ErrorInvalidRequest, "invalid Responses request JSON", ""))
 			return
 		}
 		logRec.RequestedModel = respReq.Model
 		logRec.Stream = respReq.Stream
+		logRequestStarted(verboseLogger, logRec)
 
 		irReq, err := respReq.ToIR()
 		if err != nil {
-			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorInvalidRequest, err.Error(), ""))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, logRec, started, NewProxyError(ErrorInvalidRequest, err.Error(), ""))
 			return
 		}
 		irReq.ID = requestID
@@ -64,24 +67,24 @@ func RegisterResponsesRoutes(mux *http.ServeMux, responsesRouter router.Router, 
 
 		candidates, err := responsesRouter.Resolve(r.Context(), irReq)
 		if err != nil {
-			writeLoggedOpenAIError(w, r, logger, logRec, started, proxyErrorFromRouterError(err))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, logRec, started, proxyErrorFromRouterError(err))
 			return
 		}
 		if len(candidates) == 0 {
-			writeLoggedOpenAIError(w, r, logger, logRec, started, NewProxyError(ErrorNoAvailableModel, "no available provider for model", "model"))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, logRec, started, NewProxyError(ErrorNoAvailableModel, "no available provider for model", "model"))
 			return
 		}
 
 		if respReq.Stream {
-			streamResponsesRequest(w, r, responsesRouter, candidates, irReq, logger, logRec, started)
+			streamResponsesRequest(w, r, responsesRouter, candidates, irReq, logger, logRec, started, verboseLogger)
 			return
 		}
 
-		completeResponsesRequest(w, r, responsesRouter, candidates, irReq, logger, logRec, started)
+		completeResponsesRequest(w, r, responsesRouter, candidates, irReq, logger, logRec, started, verboseLogger)
 	})))
 }
 
-func completeResponsesRequest(w http.ResponseWriter, r *http.Request, responsesRouter router.Router, candidates []router.RouteCandidate, irReq ir.Request, logger requestlog.Logger, logRec requestlog.RequestLogRecord, started time.Time) {
+func completeResponsesRequest(w http.ResponseWriter, r *http.Request, responsesRouter router.Router, candidates []router.RouteCandidate, irReq ir.Request, logger requestlog.Logger, logRec requestlog.RequestLogRecord, started time.Time, verboseLogger *slog.Logger) {
 	retryCount := 0
 	for i, candidate := range candidates {
 		attemptLog := logRec
@@ -100,7 +103,7 @@ func completeResponsesRequest(w http.ResponseWriter, r *http.Request, responsesR
 				retryCount++
 				continue
 			}
-			writeLoggedOpenAIError(w, r, logger, attemptLog, started, proxyErrorFromProviderError(err, "upstream provider request failed"))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, attemptLog, started, proxyErrorFromProviderError(err, "upstream provider request failed"))
 			return
 		}
 		responsesRouter.MarkSuccess(candidate)
@@ -113,11 +116,12 @@ func completeResponsesRequest(w http.ResponseWriter, r *http.Request, responsesR
 		attemptLog.Status = http.StatusOK
 		attemptLog.LatencyMS = time.Since(started).Milliseconds()
 		_ = logger.LogRequest(r.Context(), attemptLog)
+		logRequestFinished(verboseLogger, attemptLog)
 		return
 	}
 }
 
-func streamResponsesRequest(w http.ResponseWriter, r *http.Request, responsesRouter router.Router, candidates []router.RouteCandidate, irReq ir.Request, logger requestlog.Logger, logRec requestlog.RequestLogRecord, started time.Time) {
+func streamResponsesRequest(w http.ResponseWriter, r *http.Request, responsesRouter router.Router, candidates []router.RouteCandidate, irReq ir.Request, logger requestlog.Logger, logRec requestlog.RequestLogRecord, started time.Time, verboseLogger *slog.Logger) {
 	retryCount := 0
 candidateLoop:
 	for i, candidate := range candidates {
@@ -137,7 +141,7 @@ candidateLoop:
 				retryCount++
 				continue
 			}
-			writeLoggedOpenAIError(w, r, logger, attemptLog, started, proxyErrorFromProviderError(err, "upstream provider stream failed"))
+			writeLoggedOpenAIError(w, r, logger, verboseLogger, attemptLog, started, proxyErrorFromProviderError(err, "upstream provider stream failed"))
 			return
 		}
 
@@ -164,7 +168,7 @@ candidateLoop:
 						retryCount++
 						continue candidateLoop
 					}
-					writeLoggedOpenAIError(w, r, logger, attemptLog, started, NewProxyError(ErrorStreamInterrupted, "upstream provider stream interrupted", ""))
+					writeLoggedOpenAIError(w, r, logger, verboseLogger, attemptLog, started, NewProxyError(ErrorStreamInterrupted, "upstream provider stream interrupted", ""))
 					return
 				}
 				// Mid-stream failure: emit an error SSE event then close,
@@ -178,6 +182,7 @@ candidateLoop:
 				attemptLog.Status = http.StatusOK
 				attemptLog.LatencyMS = time.Since(started).Milliseconds()
 				_ = logger.LogRequest(r.Context(), attemptLog)
+				logRequestFinished(verboseLogger, attemptLog)
 				return
 			}
 			if !emitted {
@@ -189,6 +194,7 @@ candidateLoop:
 					attemptLog.Status = http.StatusOK
 					attemptLog.LatencyMS = time.Since(started).Milliseconds()
 					_ = logger.LogRequest(r.Context(), attemptLog)
+					logRequestFinished(verboseLogger, attemptLog)
 					return
 				}
 			}
@@ -197,6 +203,7 @@ candidateLoop:
 				attemptLog.Status = http.StatusOK
 				attemptLog.LatencyMS = time.Since(started).Milliseconds()
 				_ = logger.LogRequest(r.Context(), attemptLog)
+				logRequestFinished(verboseLogger, attemptLog)
 				return
 			}
 		}
@@ -209,6 +216,7 @@ candidateLoop:
 				attemptLog.Status = http.StatusOK
 				attemptLog.LatencyMS = time.Since(started).Milliseconds()
 				_ = logger.LogRequest(r.Context(), attemptLog)
+				logRequestFinished(verboseLogger, attemptLog)
 				return
 			}
 		}
@@ -217,12 +225,14 @@ candidateLoop:
 			attemptLog.Status = http.StatusOK
 			attemptLog.LatencyMS = time.Since(started).Milliseconds()
 			_ = logger.LogRequest(r.Context(), attemptLog)
+			logRequestFinished(verboseLogger, attemptLog)
 			return
 		}
 		responsesRouter.MarkSuccess(candidate)
 		attemptLog.Status = http.StatusOK
 		attemptLog.LatencyMS = time.Since(started).Milliseconds()
 		_ = logger.LogRequest(r.Context(), attemptLog)
+		logRequestFinished(verboseLogger, attemptLog)
 		return
 	}
 }

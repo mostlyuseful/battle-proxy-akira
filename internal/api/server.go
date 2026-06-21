@@ -118,9 +118,9 @@ func NewServer(options ...Option) http.Handler {
 	mux := http.NewServeMux()
 	RegisterHealthRoutes(mux)
 	RegisterMetricsRoutes(mux, opts.metrics)
-	RegisterModelRoutes(mux, opts.modelLister, opts.clientAuth)
-	RegisterChatRoutes(mux, opts.chatRouter, opts.clientAuth, opts.requestLogger, opts.maxBodyBytes)
-	RegisterResponsesRoutes(mux, responsesRouter, opts.clientAuth, opts.requestLogger, opts.maxBodyBytes)
+	RegisterModelRoutes(mux, opts.modelLister, opts.clientAuth, opts.logger)
+	RegisterChatRoutes(mux, opts.chatRouter, opts.clientAuth, opts.requestLogger, opts.maxBodyBytes, opts.logger)
+	RegisterResponsesRoutes(mux, responsesRouter, opts.clientAuth, opts.requestLogger, opts.maxBodyBytes, opts.logger)
 	handler := http.Handler(mux)
 	if opts.metrics != nil {
 		handler = metricsMiddleware(opts.metrics, handler)
