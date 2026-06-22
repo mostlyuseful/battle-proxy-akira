@@ -1,4 +1,6 @@
-# battle-proxy-akira
+![banner](banner.webp)
+
+# Battle Proxy Akira
 
 A small, dependency-light LLM proxy that exposes an OpenAI-compatible client API
 and forwards requests to one or more upstream providers. It supports chat
