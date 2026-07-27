@@ -73,6 +73,31 @@ func TestUILogsEndpointRequiresClientAuth(t *testing.T) {
 	}
 }
 
+func TestUILogsEndpointReturnsEmptyLogBeforeFirstRequest(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "not-created-yet.jsonl")
+	handler := NewServer(
+		WithLoggingConfig(config.LoggingConfig{Enabled: true, Path: path}),
+		WithClientAuth(StaticBearerAuth([]string{"token"})),
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ui/api/logs", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body logsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode logs response: %v", err)
+	}
+	if !body.Enabled || body.Cursor != 0 || len(body.Lines) != 0 {
+		t.Fatalf("body = %#v, want enabled empty log", body)
+	}
+}
+
 func TestUILogsEndpointReturnsOnlyAppendedLinesAfterCursor(t *testing.T) {
 	t.Parallel()
 

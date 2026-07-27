@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -369,6 +370,11 @@ func RegisterUIRoutes(mux *http.ServeMux, clientAuth Middleware, loggingCfg conf
 
 func readLogLinesSince(path string, after int, maxLines int) (int, []string, error) {
 	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		// The request logger creates its JSONL file lazily, when the first
+		// proxied request completes. Until then, the log is valid but empty.
+		return 0, []string{}, nil
+	}
 	if err != nil {
 		return 0, nil, err
 	}

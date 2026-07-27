@@ -27,6 +27,7 @@ const (
 
 const (
 	ProviderTypeOpenAICompatible = "openai_compatible"
+	ProviderTypeCodexResponses   = "codex_responses"
 )
 
 const (
@@ -249,8 +250,8 @@ func (c Config) Validate() error {
 		}
 		if provider.Type == "" {
 			problems = append(problems, path+".type is required")
-		} else if provider.Type != ProviderTypeOpenAICompatible {
-			problems = append(problems, path+".type must be openai_compatible")
+		} else if provider.Type != ProviderTypeOpenAICompatible && provider.Type != ProviderTypeCodexResponses {
+			problems = append(problems, path+".type must be openai_compatible or codex_responses")
 		}
 		if provider.BaseURL == "" {
 			problems = append(problems, path+".base_url is required")
@@ -258,6 +259,9 @@ func (c Config) Validate() error {
 			problems = append(problems, path+".base_url must be an absolute http(s) URL")
 		}
 		problems = append(problems, validateProviderAuth(path+".auth", provider.Auth)...)
+		if provider.Type == ProviderTypeCodexResponses && len(provider.Models) == 0 {
+			problems = append(problems, path+".models must contain at least one model for codex_responses")
+		}
 		for modelName, model := range provider.Models {
 			modelPath := path + ".models." + modelName
 			if strings.TrimSpace(modelName) == "" {

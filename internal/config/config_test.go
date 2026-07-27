@@ -112,6 +112,38 @@ func TestValidateReportsMissingRequiredProviderFields(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsCodexResponsesWithConfiguredModels(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Providers["codex"] = ProviderConfig{
+		Type:    ProviderTypeCodexResponses,
+		BaseURL: "https://chatgpt.com/backend-api/codex",
+		Auth:    AuthConfig{Type: AuthTypeCommandAccessToken, Command: []string{"codex-access-token", "--json"}},
+		Models: map[string]ModelConfig{
+			"gpt-codex": {Modalities: []string{"text", "image"}},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate codex_responses: %v", err)
+	}
+}
+
+func TestValidateRequiresConfiguredCodexResponsesModels(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Providers["codex"] = ProviderConfig{
+		Type:    ProviderTypeCodexResponses,
+		BaseURL: "https://chatgpt.com/backend-api/codex",
+		Auth:    AuthConfig{Type: AuthTypeEnvAccessToken, Env: "CODEX_ACCESS_TOKEN"},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "providers.codex.models must contain at least one model for codex_responses") {
+		t.Fatalf("validation error = %v", err)
+	}
+}
+
 func TestValidateReportsInvalidSyntheticCandidateReference(t *testing.T) {
 	t.Parallel()
 
