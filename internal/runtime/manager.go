@@ -164,7 +164,15 @@ func buildProviders(cfg config.Config, httpClient *http.Client, logger *slog.Log
 		if logger != nil {
 			logger.Info("provider token source configured", "provider", name, "auth_type", providerCfg.Auth.Type)
 		}
-		p, err := provider.NewOpenAICompatible(name, providerCfg, tokenSource, httpClient)
+		var p provider.Provider
+		switch providerCfg.Type {
+		case config.ProviderTypeOpenAICompatible:
+			p, err = provider.NewOpenAICompatibleWithLogger(name, providerCfg, tokenSource, httpClient, logger)
+		case config.ProviderTypeCodexResponses:
+			p, err = provider.NewCodexResponsesWithLogger(name, providerCfg, tokenSource, httpClient, logger)
+		default:
+			err = fmt.Errorf("unsupported provider type %q", providerCfg.Type)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("provider %q: %w", name, err)
 		}

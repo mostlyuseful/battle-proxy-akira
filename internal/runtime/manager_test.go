@@ -87,6 +87,27 @@ func validConfigWithoutOpenAI() *config.Config {
 	return &cfg
 }
 
+func TestManagerBuildsCodexResponsesProvider(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.Providers["codex"] = config.ProviderConfig{
+		Type:    config.ProviderTypeCodexResponses,
+		BaseURL: "https://chatgpt.com/backend-api/codex",
+		Auth:    config.AuthConfig{Type: config.AuthTypeBearerValue, Value: "header.payload.signature"},
+		Models: map[string]config.ModelConfig{
+			"gpt-codex": {Modalities: []string{ir.ModalityText}},
+		},
+	}
+	m, err := NewManager(func() (*config.Config, error) { return &cfg, nil }, nil)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, ok := m.Current().Providers["codex"].(*provider.CodexResponsesProvider); !ok {
+		t.Fatalf("provider type = %T", m.Current().Providers["codex"])
+	}
+}
+
 func TestManagerBuildSoftFailsOfflineDynamicProviderAndLazyRecovers(t *testing.T) {
 	t.Parallel()
 
