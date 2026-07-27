@@ -124,10 +124,10 @@ Map of upstream provider name to `ProviderConfig`.
 
 | Field    | Type                              | Required | Notes                                        |
 |----------|-----------------------------------|----------|----------------------------------------------|
-| `type`   | string                            | yes      | Currently only `openai_compatible`.          |
+| `type`   | string                            | yes      | `openai_compatible` or `codex_responses`.    |
 | `base_url` | string                          | yes      | Absolute `http(s)://...` URL.                |
 | `auth`   | `AuthConfig`                      | yes      | How to fetch the upstream token.             |
-| `models` | map<string, `ModelConfig`>        | yes      | At least one entry.                          |
+| `models` | map<string, `ModelConfig`>        | conditional | Required for `codex_responses`; OpenAI-compatible providers may discover models. |
 
 #### `ModelConfig`
 
@@ -153,6 +153,34 @@ Example:
   }
 }
 ```
+
+For ChatGPT subscription-backed Codex models, use the dedicated Responses
+adapter. It decodes `ChatGPT-Account-ID` from the access-token JWT, always
+streams from the Codex backend, and buffers when the downstream request is
+non-streaming. Tools and reasoning items are not supported by this adapter.
+
+```jsonc
+{
+  "providers": {
+    "codex": {
+      "type": "codex_responses",
+      "base_url": "https://chatgpt.com/backend-api/codex",
+      "auth": {
+        "type": "access_token_command",
+        "command": ["codex-access-token", "--json"],
+        "refresh_before_seconds": 120
+      },
+      "models": {
+        "gpt-5.3-codex-spark": { "modalities": ["text", "image"] }
+      }
+    }
+  }
+}
+```
+
+The adapter forwards text and image messages through the Responses API. It
+omits output-token limits rejected by the Codex backend and does not forward
+unknown endpoint-specific request fields.
 
 ### `auth` (provider token source)
 
