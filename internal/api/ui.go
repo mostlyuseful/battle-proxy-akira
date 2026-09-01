@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -380,27 +381,25 @@ func readLogLinesSince(path string, after int, maxLines int) (int, []string, err
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
+	reader := bufio.NewReader(f)
 	lines := make([]string, 0, maxLines)
 	lineNo := 0
-	for scanner.Scan() {
-		lineNo++
-		if lineNo <= after {
-			continue
+	for {
+		line, readErr := reader.ReadString('\n')
+		if len(line) > 0 {
+			lineNo++
+			line = strings.TrimSuffix(line, "\n")
+			line = strings.TrimSuffix(line, "\r")
+			if lineNo > after && len(lines) < maxLines {
+				lines = append(lines, line)
+			}
 		}
-		lines = append(lines, scanner.Text())
-		if len(lines) >= maxLines {
-			break
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return 0, nil, readErr
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return 0, nil, err
-	}
-	for scanner.Scan() {
-		lineNo++
-	}
-	if err := scanner.Err(); err != nil {
-		return 0, nil, err
 	}
 	return lineNo, lines, nil
 }

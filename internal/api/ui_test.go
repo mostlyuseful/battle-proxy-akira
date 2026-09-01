@@ -98,6 +98,35 @@ func TestUILogsEndpointReturnsEmptyLogBeforeFirstRequest(t *testing.T) {
 	}
 }
 
+func TestUILogsEndpointHandlesLargeLogEntries(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "requests.jsonl")
+	largeLine := strings.Repeat("x", 512*1024)
+	if err := os.WriteFile(path, []byte(largeLine+"\ntwo\n"), 0o600); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	handler := NewServer(
+		WithLoggingConfig(config.LoggingConfig{Enabled: true, Path: path}),
+		WithClientAuth(StaticBearerAuth([]string{"token"})),
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ui/api/logs", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body logsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode logs response: %v", err)
+	}
+	if !body.Enabled || body.Cursor != 2 || len(body.Lines) != 2 || body.Lines[0] != largeLine || body.Lines[1] != "two" {
+		t.Fatalf("body enabled = %t, cursor = %d, line count = %d", body.Enabled, body.Cursor, len(body.Lines))
+	}
+}
+
 func TestUILogsEndpointReturnsOnlyAppendedLinesAfterCursor(t *testing.T) {
 	t.Parallel()
 
