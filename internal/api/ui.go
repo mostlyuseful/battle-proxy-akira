@@ -2,11 +2,18 @@ package api
 
 import (
 	"bufio"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"battle-proxy-akira/internal/config"
 )
@@ -133,23 +140,38 @@ async function loadModels() {
   setStatus('models loaded');
 }
 
-let logCursor = 0;
+let logCursor = '0';
+let logsLoading = false;
+let pendingLogsReset = false;
 
 async function loadLogs(reset = false) {
-  setStatus('loading logs...');
-  const after = reset ? 0 : logCursor;
-  const res = await fetch('/ui/api/logs?after=' + encodeURIComponent(after), { headers: headers() });
-  const body = await res.json();
-  if (!res.ok) throw new Error(body.error?.message || body.error || 'logs failed');
-  if (reset) {
-    logsEl.innerHTML = '';
+  if (logsLoading) {
+    pendingLogsReset ||= reset;
+    return;
   }
-  const lines = body.lines || [];
-  for (const line of lines) {
-    appendLogLine(line);
+  logsLoading = true;
+  try {
+    setStatus('loading logs...');
+    const after = reset ? '0' : logCursor;
+    const res = await fetch('/ui/api/logs?after=' + encodeURIComponent(after), { headers: headers() });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error?.message || body.error || 'logs failed');
+    if (reset || body.reset) {
+      logsEl.innerHTML = '';
+    }
+    const lines = body.lines || [];
+    for (const line of lines) {
+      appendLogLine(line);
+    }
+    logCursor = body.cursor || '0';
+    setStatus(body.enabled ? ('logs loaded (' + lines.length + ' new)') : 'logging disabled');
+  } finally {
+    logsLoading = false;
+    if (pendingLogsReset) {
+      pendingLogsReset = false;
+      loadLogs(true).catch(err => setStatus(err.message));
+    }
   }
-  logCursor = body.cursor || 0;
-  setStatus(body.enabled ? ('logs loaded (' + lines.length + ' new)') : 'logging disabled');
 }
 
 function escapeHTML(s) {
@@ -338,16 +360,40 @@ pollEl.onchange();
 
 type logsResponse struct {
 	Enabled bool     `json:"enabled"`
-	Cursor  int      `json:"cursor,omitempty"`
+	Cursor  string   `json:"cursor,omitempty"`
+	Reset   bool     `json:"reset,omitempty"`
 	Lines   []string `json:"lines,omitempty"`
 	Error   string   `json:"error,omitempty"`
 }
+
+type logReadCursor struct {
+	readerID    string
+	generation  uint64
+	offset      int64
+	fingerprint string
+}
+
+type logFileReader struct {
+	path       string
+	readerID   string
+	mu         sync.Mutex
+	fileInfo   os.FileInfo
+	generation uint64
+}
+
+const (
+	logCursorVersion                = "v2"
+	logCursorFingerprintWindowBytes = int64(64)
+)
+
+var errLegacyLogCursor = errors.New("legacy log cursor")
 
 // RegisterUIRoutes wires a minimal built-in web UI and protected log viewer API.
 func RegisterUIRoutes(mux *http.ServeMux, clientAuth Middleware, loggingCfg config.LoggingConfig) {
 	if clientAuth == nil {
 		clientAuth = identityMiddleware
 	}
+	logReader := newLogFileReader(loggingCfg.Path)
 	serveUI := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(uiHTML))
@@ -359,64 +405,236 @@ func RegisterUIRoutes(mux *http.ServeMux, clientAuth Middleware, loggingCfg conf
 			writeJSON(w, http.StatusOK, logsResponse{Enabled: false})
 			return
 		}
-		after := parseNonNegativeInt(r.URL.Query().Get("after"))
-		cursor, lines, err := readLogLinesSince(loggingCfg.Path, after, 200)
+		cursor, lines, reset, err := logReader.readLinesSince(r.URL.Query().Get("after"), 200)
+		if errors.Is(err, errLegacyLogCursor) {
+			writeJSON(w, http.StatusConflict, logsResponse{Enabled: true, Error: "log cursor expired; click Load logs"})
+			return
+		}
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, logsResponse{Enabled: true, Error: "read logs failed"})
 			return
 		}
-		writeJSON(w, http.StatusOK, logsResponse{Enabled: true, Cursor: cursor, Lines: lines})
+		writeJSON(w, http.StatusOK, logsResponse{Enabled: true, Cursor: cursor, Reset: reset, Lines: lines})
 	})))
 }
 
-func readLogLinesSince(path string, after int, maxLines int) (int, []string, error) {
-	f, err := os.Open(path)
+func newLogFileReader(path string) *logFileReader {
+	reader := &logFileReader{path: path}
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err == nil {
+		reader.readerID = hex.EncodeToString(id[:])
+	} else {
+		// The identifier only distinguishes cursor generations; it is not a
+		// secret. Keep the UI available even if the system RNG is unavailable.
+		reader.readerID = strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return reader
+}
+
+func (r *logFileReader) readLinesSince(rawCursor string, maxLines int) (string, []string, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, legacyCursor := parseLegacyLogCursor(rawCursor); legacyCursor {
+		// A line-number cursor carries no file identity. Applying it after an
+		// upgrade could silently skip records from a rotated or recreated file.
+		return "", nil, false, errLegacyLogCursor
+	}
+
+	f, err := os.Open(r.path)
 	if errors.Is(err, os.ErrNotExist) {
-		// The request logger creates its JSONL file lazily, when the first
-		// proxied request completes. Until then, the log is valid but empty.
-		return 0, []string{}, nil
+		// The logger creates its JSONL file lazily. If a file disappeared,
+		// advance the generation so its cursor cannot apply to a recreated path.
+		reset := rawCursor != "" && rawCursor != "0"
+		r.markMissing()
+		return r.encodeCursor(logReadCursor{}), []string{}, reset, nil
 	}
 	if err != nil {
-		return 0, nil, err
+		return "", nil, false, err
 	}
 	defer f.Close()
 
-	reader := bufio.NewReader(f)
+	openedInfo, err := f.Stat()
+	if err != nil {
+		return "", nil, false, err
+	}
+	r.observe(openedInfo)
+
+	cursor, validCursor := parseLogCursor(rawCursor)
+	reset := false
+	validateFingerprint := false
+	switch {
+	case rawCursor == "" || rawCursor == "0":
+		cursor = r.currentCursor(0, "")
+	case validCursor:
+		if cursor.readerID != r.readerID || cursor.generation != r.generation {
+			reset = true
+			cursor = r.currentCursor(0, "")
+		} else {
+			validateFingerprint = cursor.offset > 0
+		}
+	default:
+		reset = true
+		cursor = r.currentCursor(0, "")
+	}
+
+	if cursor.offset > openedInfo.Size() {
+		reset = true
+		cursor = r.currentCursor(0, "")
+		validateFingerprint = false
+	} else if validateFingerprint {
+		fingerprint, fingerprintErr := logFingerprintAt(f, cursor.offset)
+		if errors.Is(fingerprintErr, io.EOF) || errors.Is(fingerprintErr, io.ErrUnexpectedEOF) {
+			reset = true
+			cursor = r.currentCursor(0, "")
+		} else if fingerprintErr != nil {
+			return "", nil, false, fingerprintErr
+		} else if fingerprint != cursor.fingerprint {
+			reset = true
+			cursor = r.currentCursor(0, "")
+		}
+	}
+
+	if _, err := f.Seek(cursor.offset, io.SeekStart); err != nil {
+		return "", nil, false, err
+	}
+	if maxLines < 0 {
+		maxLines = 0
+	}
 	lines := make([]string, 0, maxLines)
-	lineNo := 0
-	for {
+	offset := cursor.offset
+	reader := bufio.NewReader(f)
+	for len(lines) < maxLines {
 		line, readErr := reader.ReadString('\n')
-		if len(line) > 0 {
-			lineNo++
+		if strings.HasSuffix(line, "\n") {
+			offset += int64(len(line))
 			line = strings.TrimSuffix(line, "\n")
 			line = strings.TrimSuffix(line, "\r")
-			if lineNo > after && len(lines) < maxLines {
-				lines = append(lines, line)
-			}
+			lines = append(lines, line)
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
 				break
 			}
-			return 0, nil, readErr
+			return "", nil, false, readErr
 		}
 	}
-	return lineNo, lines, nil
+
+	// Check the pathname after reading. If it was deleted or replaced while
+	// this descriptor was open, discard the stale result and invalidate its
+	// generation. An unlinked descriptor itself remains safe to read on Unix.
+	pathInfo, err := os.Stat(r.path)
+	if errors.Is(err, os.ErrNotExist) {
+		r.markMissing()
+		return r.encodeCursor(logReadCursor{}), []string{}, true, nil
+	}
+	if err != nil {
+		return "", nil, false, err
+	}
+	if !os.SameFile(openedInfo, pathInfo) {
+		r.observe(pathInfo)
+		return r.encodeCursor(logReadCursor{}), []string{}, true, nil
+	}
+
+	fingerprint, err := logFingerprintAt(f, offset)
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		// The same file was truncated while it was being read.
+		return r.encodeCursor(logReadCursor{}), []string{}, true, nil
+	}
+	if err != nil {
+		return "", nil, false, err
+	}
+	return r.encodeCursor(r.currentCursor(offset, fingerprint)), lines, reset, nil
 }
 
-func parseNonNegativeInt(raw string) int {
-	if raw == "" {
-		return 0
-	}
-	value := 0
-	for _, r := range raw {
-		if r < '0' || r > '9' {
-			return 0
+func (r *logFileReader) observe(info os.FileInfo) {
+	if r.fileInfo == nil {
+		if r.generation == 0 {
+			r.generation++
 		}
-		value = value*10 + int(r-'0')
+		r.fileInfo = info
+		return
 	}
-	if value < 0 {
-		return 0
+	if !os.SameFile(r.fileInfo, info) {
+		r.generation++
+		r.fileInfo = info
 	}
-	return value
+}
+
+func (r *logFileReader) markMissing() {
+	if r.fileInfo != nil {
+		r.generation++
+		r.fileInfo = nil
+	}
+}
+
+func (r *logFileReader) currentCursor(offset int64, fingerprint string) logReadCursor {
+	return logReadCursor{
+		readerID:    r.readerID,
+		generation:  r.generation,
+		offset:      offset,
+		fingerprint: fingerprint,
+	}
+}
+
+func (r *logFileReader) encodeCursor(cursor logReadCursor) string {
+	cursor.readerID = r.readerID
+	cursor.generation = r.generation
+	if cursor.offset <= 0 {
+		return fmt.Sprintf("%s:%s:%d:0", logCursorVersion, cursor.readerID, cursor.generation)
+	}
+	return fmt.Sprintf("%s:%s:%d:%d:%s", logCursorVersion, cursor.readerID, cursor.generation, cursor.offset, cursor.fingerprint)
+}
+
+func parseLogCursor(raw string) (logReadCursor, bool) {
+	parts := strings.Split(raw, ":")
+	if len(parts) < 4 || parts[0] != logCursorVersion || parts[1] == "" {
+		return logReadCursor{}, false
+	}
+	generation, err := strconv.ParseUint(parts[2], 10, 64)
+	if err != nil {
+		return logReadCursor{}, false
+	}
+	if len(parts) == 4 && parts[3] == "0" {
+		return logReadCursor{readerID: parts[1], generation: generation}, true
+	}
+	if len(parts) != 5 {
+		return logReadCursor{}, false
+	}
+	offset, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil || offset <= 0 {
+		return logReadCursor{}, false
+	}
+	fingerprint, err := hex.DecodeString(parts[4])
+	if err != nil || len(fingerprint) != sha256.Size {
+		return logReadCursor{}, false
+	}
+	return logReadCursor{
+		readerID:    parts[1],
+		generation:  generation,
+		offset:      offset,
+		fingerprint: hex.EncodeToString(fingerprint),
+	}, true
+}
+
+func parseLegacyLogCursor(raw string) (int64, bool) {
+	line, err := strconv.ParseInt(raw, 10, 64)
+	return line, err == nil && line > 0
+}
+
+func logFingerprintAt(f *os.File, offset int64) (string, error) {
+	if offset <= 0 {
+		return "", nil
+	}
+	firstLen := min(offset, logCursorFingerprintWindowBytes)
+	lastStart := max(int64(0), offset-logCursorFingerprintWindowBytes)
+	data := make([]byte, firstLen+offset-lastStart)
+	if _, err := f.ReadAt(data[:firstLen], 0); err != nil {
+		return "", err
+	}
+	if _, err := f.ReadAt(data[firstLen:], lastStart); err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:]), nil
 }
