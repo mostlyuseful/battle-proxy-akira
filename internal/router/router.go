@@ -127,21 +127,21 @@ func (r *StaticRouter) Models(ctx context.Context) ([]ir.Model, error) {
 	cfg := r.cfg
 	r.mu.RUnlock()
 
-	modelsByID := map[string]ir.Model{}
+	// Keep each provider/model pair. The API qualifies direct models with their
+	// provider name, so collapsing by bare model ID hides models offered by a
+	// later provider (for example, OpenRouter's non-batch model when another
+	// provider also exposes that ID).
+	models := make([]ir.Model, 0)
 	for _, providerName := range sortedProviderNames(cfg.Providers) {
 		providerCfg := cfg.Providers[providerName]
-		modelNames := sortedModelNames(providerCfg.Models)
-		for _, modelName := range modelNames {
+		for _, modelName := range sortedModelNames(providerCfg.Models) {
 			modelCfg := providerCfg.Models[modelName]
-			if _, exists := modelsByID[modelName]; exists {
-				continue
-			}
-			modelsByID[modelName] = ir.Model{
+			models = append(models, ir.Model{
 				ID:         modelName,
 				Provider:   providerName,
 				Name:       modelName,
 				Modalities: append([]string(nil), modelCfg.Modalities...),
-			}
+			})
 		}
 	}
 
@@ -150,7 +150,7 @@ func (r *StaticRouter) Models(ctx context.Context) ([]ir.Model, error) {
 		if !synthetic.Expose {
 			continue
 		}
-		modelsByID[alias] = ir.Model{
+		models = append(models, ir.Model{
 			ID:        alias,
 			Provider:  "proxy",
 			Name:      alias,
@@ -158,19 +158,9 @@ func (r *StaticRouter) Models(ctx context.Context) ([]ir.Model, error) {
 			Metadata: map[string]string{
 				"strategy": synthetic.Strategy,
 			},
-		}
+		})
 	}
 
-	ids := make([]string, 0, len(modelsByID))
-	for id := range modelsByID {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-
-	models := make([]ir.Model, 0, len(ids))
-	for _, id := range ids {
-		models = append(models, modelsByID[id])
-	}
 	return models, nil
 }
 

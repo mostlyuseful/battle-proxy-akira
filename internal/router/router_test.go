@@ -427,6 +427,33 @@ func TestModelsIncludesExposedSyntheticAliases(t *testing.T) {
 	}
 }
 
+func TestModelsKeepsDuplicateIDsFromDifferentProviders(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.Providers["backup"] = config.ProviderConfig{
+		Models: map[string]config.ModelConfig{
+			"gpt-5.2": {Modalities: []string{ir.ModalityText}},
+		},
+	}
+	r := NewStatic(cfg, nil)
+
+	models, err := r.Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+
+	providers := map[string]bool{}
+	for _, model := range models {
+		if model.ID == "gpt-5.2" {
+			providers[model.Provider] = true
+		}
+	}
+	if !providers["openai_api"] || !providers["backup"] || len(providers) != 2 {
+		t.Fatalf("providers for gpt-5.2 = %#v, want openai_api and backup", providers)
+	}
+}
+
 func TestRouteCandidateProviderRequestAndResponseRewrite(t *testing.T) {
 	t.Parallel()
 
