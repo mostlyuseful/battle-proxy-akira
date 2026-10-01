@@ -1,0 +1,14 @@
+{
+  "server": {
+    "addr": "127.0.0.1:8080"
+  },
+  "client_auth": {
+    "mode": "none"
+  },
+  "providers": {},
+  "synthetic_models": {},
+  "logging": {
+    "enabled": false,
+    "mode": "off"
+  }
+}

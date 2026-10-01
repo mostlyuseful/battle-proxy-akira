@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,7 +20,8 @@ import (
 )
 
 const (
-	defaultShutdownTimeout = 10 * time.Second
+	defaultShutdownTimeout  = 10 * time.Second
+	defaultSystemConfigPath = "/etc/battle-proxy-akira/config.json"
 )
 
 // runtimeFlags bundles command-line flags for building a runtime config.
@@ -32,7 +34,7 @@ func main() {
 	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	verbose := flags.Bool("verbose", false, "log informational and debug messages")
 	help := flags.Bool("help", false, "show usage information")
-	cfgPath := flags.String("config", "", "path to JSON config file")
+	cfgPath := flags.String("config", "", "path to JSON config file (default: system config when present)")
 	addr := flags.String("addr", "", "server listen address (overrides config)")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		slog.Error("parse flags", "error", err)
@@ -44,7 +46,12 @@ func main() {
 		os.Exit(0)
 	}
 
-	rf := runtimeFlags{configPath: *cfgPath, addr: *addr}
+	configPath, err := resolveConfigPath(*cfgPath, defaultSystemConfigPath)
+	if err != nil {
+		slog.Error("resolve config path", "error", err)
+		os.Exit(1)
+	}
+	rf := runtimeFlags{configPath: configPath, addr: *addr}
 
 	cfg, err := loadRuntimeConfigWithVerbose(rf, *verbose, slog.Default())
 	if err != nil {
@@ -136,6 +143,18 @@ func runReloadLoop(signals <-chan os.Signal, reload func() error) {
 		}
 		slog.Info("config reloaded")
 	}
+}
+
+func resolveConfigPath(explicitPath, systemPath string) (string, error) {
+	if explicitPath != "" {
+		return explicitPath, nil
+	}
+	if _, err := os.Stat(systemPath); err == nil {
+		return systemPath, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("check default config %q: %w", systemPath, err)
+	}
+	return "", nil
 }
 
 func loadRuntimeConfig(rf runtimeFlags) (*config.Config, error) {

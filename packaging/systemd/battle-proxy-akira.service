@@ -1,0 +1,32 @@
+[Unit]
+Description=Battle Proxy Akira LLM proxy
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=battle-proxy
+Group=battle-proxy
+WorkingDirectory=/var/lib/battle-proxy-akira
+StateDirectory=battle-proxy-akira
+LogsDirectory=battle-proxy-akira
+UMask=0077
+ExecStart=/usr/bin/battle-proxy-akira -config /etc/battle-proxy-akira/config.json
+ExecReload=/usr/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

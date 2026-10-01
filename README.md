@@ -14,7 +14,7 @@ reload on `SIGHUP`.
 make build
 ./llm-proxy -config ./config.json
 
-# or use defaults
+# use /etc/battle-proxy-akira/config.json when present; otherwise use defaults
 ./llm-proxy
 
 # or run via Make
@@ -32,13 +32,41 @@ make run
 
 Reload config without restarting: `kill -HUP <pid>`.
 
+### Arch Linux package and systemd service
+
+The repository `PKGBUILD` creates a VCS package from the `main` branch. It
+installs the binary as `/usr/bin/battle-proxy-akira`, the starter config as
+`/etc/battle-proxy-akira/config.json`, and the unit
+`battle-proxy-akira.service`. The config is a pacman backup file: local edits
+are preserved during upgrades and conflicting updates are installed as a
+`.pacnew` file.
+
+After installing the package, edit the config and enable the service:
+
+```sh
+sudoedit /etc/battle-proxy-akira/config.json
+sudo systemctl enable --now battle-proxy-akira.service
+```
+
+The service runs as the unprivileged `battle-proxy` account. A systemd-tmpfiles
+rule makes the config readable by that account while keeping it non-world-
+readable, so secrets in the config are not exposed to other local users. It
+writes logs to the journal; if request logging is enabled, configure its path
+under `/var/log/battle-proxy-akira/`. Reload edited configuration with
+`sudo systemctl reload battle-proxy-akira.service`. For file-based provider
+tokens, store the token under `/etc/battle-proxy-akira/` (the service cannot
+read paths under `/home`) and grant the `battle-proxy` account read access to
+the token file.
+
 ---
 
 ## Configuration file
 
-The proxy reads a JSON file passed via `-config`. If `-config` is empty, the
-proxy starts with built-in defaults (no upstream providers; health endpoints
-only).
+The proxy reads a JSON file passed via `-config`. An explicit `-config` path
+wins; otherwise, it loads `/etc/battle-proxy-akira/config.json` when that file
+exists. If neither is available, it starts with built-in defaults (no upstream
+providers; health endpoints only). The systemd service uses the `/etc` path
+explicitly, so it fails to start if that file is missing.
 
 All fields are optional except where noted. Unknown fields are rejected.
 

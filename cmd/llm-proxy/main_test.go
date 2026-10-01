@@ -45,6 +45,24 @@ func TestNewHTTPServerAppliesConfiguredTimeouts(t *testing.T) {
 	}
 }
 
+func TestResolveConfigPath(t *testing.T) {
+	systemPath := filepath.Join(t.TempDir(), "config.json")
+	if path, err := resolveConfigPath("", systemPath); err != nil || path != "" {
+		t.Fatalf("missing system config = (%q, %v), want empty path and no error", path, err)
+	}
+	if err := os.WriteFile(systemPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write system config: %v", err)
+	}
+	if path, err := resolveConfigPath("", systemPath); err != nil || path != systemPath {
+		t.Fatalf("present system config = (%q, %v), want %q and no error", path, err, systemPath)
+	}
+
+	explicitPath := filepath.Join(t.TempDir(), "explicit.json")
+	if path, err := resolveConfigPath(explicitPath, systemPath); err != nil || path != explicitPath {
+		t.Fatalf("explicit config = (%q, %v), want %q and no error", path, err, explicitPath)
+	}
+}
+
 func TestLoadRuntimeConfigWithVerbose(t *testing.T) {
 	// Default config (empty path).
 	cfg, err := loadRuntimeConfigWithVerbose(runtimeFlags{}, false, nil)
